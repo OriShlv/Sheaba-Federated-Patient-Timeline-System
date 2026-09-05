@@ -5,12 +5,16 @@ implemented state only; later branches update this file as behavior is added.
 
 ## Current scope
 
-The backend currently provides a typed FastAPI application skeleton, environment-based
-settings, lifespan-managed shared clients, normalized domain contracts, deterministic ID
-construction, privacy-safe JSON logging, and development tooling.
+The backend currently provides a Registry-only vertical slice: `GET /api/timeline` parses a
+positive `patientId` and optional inclusive `from`/`to` bounds, calls `TimelineService`,
+reads surgery and emergency-room parents through `RegistryAdapter`, and returns normalized
+events. Registry parents currently have empty `children`, while `standalone` is empty and
+`partial` is `false`.
 
-The timeline endpoint, source adapters, access policy, grouping, federation, and partial
-failure HTTP behavior are intentionally not implemented in this foundation branch.
+PACS, Vitals, grouping, RBAC, requested-type filtering, multi-source federation, retries,
+and partial-failure HTTP behavior are intentionally not implemented yet. `types` and
+`X-User-Role` therefore have no behavioral semantics in this slice and are not advertised
+as implemented inputs.
 
 ## Local setup
 
@@ -29,8 +33,9 @@ The application does not contact Postgres, MongoDB, or Vitals during import. Its
 pool starts with zero connections, and PyMongo connects lazily. The supplied infrastructure
 is therefore not required merely to load the application or `/docs`.
 
-Available foundation endpoints:
+Available endpoints:
 
+- Registry timeline: `http://localhost:3000/api/timeline?patientId=1`
 - OpenAPI schema: `http://localhost:3000/openapi.json`
 - Swagger UI: `http://localhost:3000/docs`
 
@@ -41,14 +46,22 @@ Configuration uses `TIMELINE_`-prefixed environment variables documented in
 
 ```text
 src/timeline_api/
-├── config.py       # Typed environment settings
-├── logging.py      # Privacy-safe JSON operational logging
-├── main.py         # FastAPI application factory and application instance
-├── resources.py    # Shared client creation, access, and shutdown
+├── adapters/
+│   └── registry.py # Parameterized Registry reads and normalization
+├── api/
+│   ├── models.py   # Current Registry-only HTTP response
+│   ├── query.py    # Timeline query parsing and validation
+│   └── routes.py   # Thin route, dependencies, and HTTP error translation
+├── services/
+│   └── timeline.py # Registry-only application orchestration
+├── config.py        # Typed environment settings
+├── logging.py       # Privacy-safe JSON operational logging
+├── main.py          # FastAPI application factory and application instance
+├── resources.py     # Shared client creation, access, and shutdown
 └── domain/
-    ├── ids.py      # Normalized event ID construction
-    ├── models.py   # Typed normalized event contracts
-    └── outcomes.py # Typed source success/unavailable contracts
+    ├── ids.py       # Normalized event ID construction
+    ├── models.py    # Typed normalized event contracts
+    └── outcomes.py  # Typed source success/unavailable contracts
 ```
 
 The four normalized event variants are surgery, emergency room, imaging, and vitals.
@@ -87,6 +100,19 @@ python -c "from timeline_api.main import app; print(app.title)"
 
 The startup and docs tests enter the real application lifespan while external services are
 absent, proving that foundation startup remains lazy.
+
+To run the live Registry checks after starting the supplied PostgreSQL container:
+
+```bash
+cd backend
+TIMELINE_RUN_LIVE_TESTS=1 pytest tests/test_registry_live.py
+curl "http://localhost:3000/api/timeline?patientId=1"
+```
+
+The seed defines patient `1` with three surgeries and two emergency-room encounters. Live
+tests verify those counts through the endpoint and exercise no bounds, each single bound,
+both inclusive boundaries, non-overlap exclusion, and patient filtering through the real
+adapter.
 
 ## Decisions
 
@@ -131,10 +157,69 @@ concurrency and dependency behavior.
 
 
 
+### asyncpg Registry access
+
+- **Decision:** Use asyncpg directly with two fixed, parameterized Registry queries.
+- **Rationale:** The supplied Registry slice needs only readable surgery and emergency-room
+reads, and the shared asyncpg pool already fits FastAPI's asynchronous lifecycle.
+- **Alternative considered:** SQLAlchemy with ORM or Core models.
+- **Why not selected for this assignment:** Its mapping and abstraction overhead does not
+improve two stable queries against a supplied schema.
+- **Production reconsideration trigger:** Reconsider when the database domain grows,
+schema migrations become application-owned, or composable queries outweigh the extra
+layer.
+
+
+
+### Registry adapter boundary
+
+- **Decision:** Keep asyncpg records, SQL column names, and Registry timestamp handling
+inside `RegistryAdapter`; return only normalized typed parent events to `TimelineService`.
+- **Rationale:** Application behavior can depend on one source-independent event contract
+instead of database result shapes.
+- **Alternative considered:** Return asyncpg records to the service and normalize there.
+- **Why not selected for this assignment:** It leaks source details across the adapter
+boundary and gives the service both integration and orchestration responsibilities.
+- **Production reconsideration trigger:** Keep the boundary even if persistence technology
+changes; revise only the normalized contract when product requirements add real fields.
+
+
+
+### Registry parent interval filtering
+
+- **Decision:** Apply inclusive interval-overlap predicates in SQL:
+`end_time >= from` and `start_time <= to`, omitting each predicate when its bound is absent.
+- **Rationale:** A parent that starts before the requested range can still be active inside
+it, and exact start/end boundaries belong to the requested timeline.
+- **Alternative considered:** Filter only by parent start time or load all patient rows and
+filter in Python.
+- **Why not selected for this assignment:** Start-only filtering drops valid overlaps, and
+application-side filtering transfers avoidable rows and duplicates database work.
+- **Production reconsideration trigger:** Preserve overlap semantics; reconsider query
+shape or add measured indexes when production volume and query plans require it.
+
+
+
+### Registry timestamp assumption
+
+- **Decision:** Interpret the supplied Registry's timezone-naive `TIMESTAMP` values as UTC
+at the adapter boundary and immediately create timezone-aware UTC domain values. UTC API
+bounds are converted back to naive UTC only when bound to those supplied columns.
+- **Rationale:** Naive datetimes do not cross into the application/domain layer, while
+comparisons remain compatible with the unmodified assignment schema.
+- **Alternative considered:** Change the supplied columns to `TIMESTAMPTZ`.
+- **Why not selected for this assignment:** This branch consumes the provided schema and
+must not silently migrate it or reinterpret seeded values.
+- **Production reconsideration trigger:** Define an explicit source timezone contract and
+use an appropriate timezone-aware database type before handling real clinical timestamps.
+
+
+
 ### Normalized event IDs
 
 - **Decision:** Construct IDs as `<source>:<type>:<source-key>` with a small pure helper.
-- **Rationale:** IDs are deterministic, stable, and unambiguous across sources.
+- **Rationale:** IDs are deterministic, stable, and unambiguous across sources. Registry
+parents currently produce `registry:surgery:<id>` and `registry:emergency_room:<id>`.
 - **Alternative considered:** A generic ID framework or generated UUIDs.
 - **Why not selected for this assignment:** A framework adds abstraction without another
 ID use case, while generated UUIDs are not stable across fetches.
@@ -160,8 +245,8 @@ production compliance and operations requirements are defined.
 ### AI usage
 
 - **Decision:** Use Cursor's coding agent to inspect the approved plan and supplied
-infrastructure, create the foundation code/tests/documentation, run validation, and
-perform branch review.
+PostgreSQL schema/seed and foundation, then implement Registry SQL/normalization,
+service/route wiring, focused and live tests, documentation, validation, and branch review.
 - **Rationale:** The agent accelerates mechanical implementation and systematic checking
 while the developer retains responsibility for scope and technical decisions.
 - **Alternative considered:** Implement and review the branch without AI assistance.
