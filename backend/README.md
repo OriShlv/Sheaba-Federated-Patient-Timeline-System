@@ -5,16 +5,18 @@ implemented state only; later branches update this file as behavior is added.
 
 ## Current scope
 
-The backend currently provides a Registry-only vertical slice: `GET /api/timeline` parses a
-positive `patientId` and optional inclusive `from`/`to` bounds, calls `TimelineService`,
-reads surgery and emergency-room parents through `RegistryAdapter`, and returns normalized
-events. Registry parents currently have empty `children`, while `standalone` is empty and
-`partial` is `false`.
+The backend currently provides a Registry vertical slice and a pure grouping module.
+`GET /api/timeline` parses a positive `patientId` and optional inclusive `from`/`to`
+bounds, calls `TimelineService`, reads surgery and emergency-room parents through
+`RegistryAdapter`, and returns normalized events. The grouping module accepts
+already-normalized authorized parents and children, but it is intentionally not wired into
+the Registry-only service until the federation branch. API parents therefore still have
+empty `children`, while `standalone` is empty and `partial` is `false`.
 
-PACS, Vitals, grouping, RBAC, requested-type filtering, multi-source federation, retries,
-and partial-failure HTTP behavior are intentionally not implemented yet. `types` and
-`X-User-Role` therefore have no behavioral semantics in this slice and are not advertised
-as implemented inputs.
+PACS, Vitals, grouping integration, RBAC, requested-type filtering, multi-source
+federation, retries, and partial-failure HTTP behavior are intentionally not implemented
+yet. `types` and `X-User-Role` therefore have no behavioral semantics in this slice and are
+not advertised as implemented inputs.
 
 ## Local setup
 
@@ -53,6 +55,7 @@ src/timeline_api/
 │   ├── query.py    # Timeline query parsing and validation
 │   └── routes.py   # Thin route, dependencies, and HTTP error translation
 ├── services/
+│   ├── grouping.py # Pure deterministic temporal grouping
 │   └── timeline.py # Registry-only application orchestration
 ├── config.py        # Typed environment settings
 ├── logging.py       # Privacy-safe JSON operational logging
@@ -67,7 +70,8 @@ src/timeline_api/
 The four normalized event variants are surgery, emergency room, imaging, and vitals.
 Source-specific documents and responses do not belong in these contracts. Parent events
 require valid inclusive intervals, all timestamps are timezone-aware and normalized to UTC,
-and models are immutable.
+and models are immutable. Grouping imports only these normalized contracts and standard
+library utilities; it has no framework, policy, configuration, adapter, or I/O dependency.
 
 One resource set is created per FastAPI lifespan:
 
@@ -91,6 +95,7 @@ contain patient identifiers.
 
 ```bash
 cd backend
+pytest tests/unit/test_grouping.py
 pytest
 ruff check .
 ruff format --check .
@@ -228,6 +233,40 @@ requires opaque identifiers.
 
 
 
+### Pure timeline grouping
+
+- **Decision:** Use a pure `group_events` function that receives normalized parent and
+child sequences and returns immutable parent groups plus standalone children without
+mutating or copying event objects.
+- **Rationale:** Temporal assignment can be tested independently from FastAPI, policy,
+configuration, adapters, databases, and HTTP clients. The function can later receive only
+the events already authorized and selected by application orchestration.
+- **Algorithm:** Sort copied parent entries by start and copied children chronologically,
+then sweep the children. Activate parents whose start is at or before the child into a heap
+ordered by latest start and then normalized ID ascending. Lazily remove candidates whose
+end is before the child; the remaining heap winner contains the child. Exact start and end
+matches are therefore inclusive.
+- **Complexity:** After ordering inputs, heap assignment is
+`O((P + C) log P)`. For arbitrary unsorted inputs, exact end-to-end time is
+`O(P log P + C log C + (P + C) log P)` and space is `O(P + C)`. Sorting children is
+required by the output contract and input-order independence.
+- **Alternative considered:** For each child, scan every parent and choose the best match
+in `O(P * C)` time. It is simpler as a small test oracle but is not used in application
+code because the sweep remains readable while scaling better.
+- **Overlap winner:** When intervals overlap, the eligible parent with the latest start
+wins, directly following the assignment algorithm.
+- **Equal-start assumption:** The assignment does not define identical parent starts.
+Stable normalized parent ID ascending is the deterministic tie-breaker.
+- **Standalone ambiguity:** The response-contract comment says `standalone` is always
+empty, but the grouping algorithm and supplied PACS/Vitals seed cases explicitly mark
+unmatched children as standalone. The implementation follows the algorithm and seeds.
+- **Ordering:** Parents are newest first by `(start descending, ID ascending)`. Children
+within a parent and standalone children are chronological by
+`(timestamp ascending, ID ascending)`.
+- **Production reconsideration trigger:** Revisit the deterministic tie only if the
+product contract defines another clinical precedence rule.
+
+
 ### Privacy-safe operational logging
 
 - **Decision:** Use the standard logging library with a JSON formatter that serializes only
@@ -244,9 +283,10 @@ production compliance and operations requirements are defined.
 
 ### AI usage
 
-- **Decision:** Use Cursor's coding agent to inspect the approved plan and supplied
-PostgreSQL schema/seed and foundation, then implement Registry SQL/normalization,
-service/route wiring, focused and live tests, documentation, validation, and branch review.
+- **Decision:** Use Cursor's coding agent to inspect the approved plan, assignment,
+normalized domain contracts, and supplied seeds; implement the Registry vertical slice and
+pure grouping algorithm; add focused tests and documentation; and run validation and
+complete-diff reviews.
 - **Rationale:** The agent accelerates mechanical implementation and systematic checking
 while the developer retains responsibility for scope and technical decisions.
 - **Alternative considered:** Implement and review the branch without AI assistance.
