@@ -17,7 +17,7 @@ def test_json_formatter_emits_only_allowlisted_operational_context() -> None:
         args=(),
         exc_info=None,
         extra={
-            "operational_event": OperationalEvent.APPLICATION_STARTED,
+            "operational_event": OperationalEvent.SOURCE_FETCH_COMPLETED,
             "source": "pacs",
             "outcome": "success",
             "duration_ms": 12,
@@ -31,7 +31,7 @@ def test_json_formatter_emits_only_allowlisted_operational_context() -> None:
     formatted_record = JsonFormatter().format(record)
     entry = json.loads(formatted_record)
 
-    assert entry["event"] == "application_started"
+    assert entry["event"] == "source_fetch_completed"
     assert entry["source"] == "pacs"
     assert entry["outcome"] == "success"
     assert entry["duration_ms"] == 12

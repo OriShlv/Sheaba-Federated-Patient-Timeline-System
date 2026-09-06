@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     mongo_uri: MongoDsn = MongoDsn("mongodb://localhost:27017")
     mongo_database: str = "pacs"
     vitals_base_url: AnyHttpUrl = AnyHttpUrl("http://localhost:3001")
+    registry_timeout_seconds: float = Field(default=5.0, gt=0)
     pacs_timeout_seconds: float = Field(default=5.0, gt=0)
     vitals_timeout_seconds: float = Field(default=5.0, gt=0)
     log_level: LogLevel = LogLevel.INFO

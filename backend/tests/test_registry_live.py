@@ -29,7 +29,7 @@ async def fetch_live_event_counts() -> dict[str, int]:
         min_size=0,
         max_size=1,
     )
-    adapter = RegistryAdapter(pool)
+    adapter = RegistryAdapter(pool, settings.registry_timeout_seconds)
     try:
         cases = {
             "no_bounds": await adapter.fetch_parent_events(1, None, None),
@@ -73,7 +73,14 @@ def test_live_endpoint_returns_seeded_registry_parents() -> None:
     application = create_app(Settings())
 
     with TestClient(application) as client:
-        response = client.get("/api/timeline", params={"patientId": "1"})
+        response = client.get(
+            "/api/timeline",
+            params={
+                "patientId": "1",
+                "types": "surgery,emergency_room",
+            },
+            headers={"X-User-Role": "doctor"},
+        )
 
     assert response.status_code == 200
     body = response.json()

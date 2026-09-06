@@ -12,6 +12,7 @@ from timeline_api.config import Settings
 
 @dataclass(frozen=True, slots=True)
 class AppResources:
+    settings: Settings
     postgres_pool: asyncpg.Pool
     mongo_client: AsyncMongoClient[dict[str, object]]
     http_client: httpx.AsyncClient
@@ -30,6 +31,7 @@ async def create_resources(settings: Settings) -> AppResources:
     http_client = httpx.AsyncClient(base_url=str(settings.vitals_base_url))
 
     return AppResources(
+        settings=settings,
         postgres_pool=postgres_pool,
         mongo_client=mongo_client,
         http_client=http_client,

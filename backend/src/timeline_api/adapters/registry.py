@@ -1,7 +1,9 @@
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 
 import asyncpg
+from pydantic import ValidationError
 
 from timeline_api.domain import (
     EmergencyRoomData,
@@ -31,6 +33,10 @@ WHERE patient_id = $1
   AND ($3::timestamp IS NULL OR start_time <= $3::timestamp)
 ORDER BY start_time DESC, id ASC
 """
+
+
+class RegistryRowValidationError(ValueError):
+    """Raised when a Registry row does not match the supplied source contract."""
 
 
 def normalize_registry_datetime(value: datetime) -> datetime:
@@ -75,6 +81,22 @@ def map_surgery(row: Mapping[str, object]) -> SurgeryEvent:
     )
 
 
+def map_registry_row[T: ParentEvent](
+    row: Mapping[str, object],
+    mapper: Callable[[Mapping[str, object]], T],
+) -> T:
+    try:
+        return mapper(row)
+    except ValidationError as exc:
+        raise RegistryRowValidationError(
+            "Registry row is missing or has invalid required fields"
+        ) from exc
+    except (KeyError, TypeError):
+        raise RegistryRowValidationError(
+            "Registry row is missing or has invalid required fields"
+        ) from None
+
+
 def map_emergency_room(row: Mapping[str, object]) -> EmergencyRoomEvent:
     source_id = read_row_value(row, "id", int)
     start = normalize_registry_datetime(read_row_value(row, "start_time", datetime))
@@ -95,8 +117,9 @@ def map_emergency_room(row: Mapping[str, object]) -> EmergencyRoomEvent:
 
 
 class RegistryAdapter:
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(self, pool: asyncpg.Pool, timeout_seconds: float) -> None:
         self._pool = pool
+        self._timeout_seconds = timeout_seconds
 
     async def fetch_parent_events(
         self,
@@ -106,6 +129,17 @@ class RegistryAdapter:
     ) -> tuple[ParentEvent, ...]:
         query_from = to_registry_query_datetime(from_)
         query_to = to_registry_query_datetime(to)
+        return await asyncio.wait_for(
+            self._load_parent_events(patient_id, query_from, query_to),
+            self._timeout_seconds,
+        )
+
+    async def _load_parent_events(
+        self,
+        patient_id: int,
+        query_from: datetime | None,
+        query_to: datetime | None,
+    ) -> tuple[ParentEvent, ...]:
         surgery_rows = await self._pool.fetch(
             SURGERIES_QUERY,
             patient_id,
@@ -119,7 +153,7 @@ class RegistryAdapter:
             query_to,
         )
         events: tuple[ParentEvent, ...] = (
-            *(map_surgery(row) for row in surgery_rows),
-            *(map_emergency_room(row) for row in emergency_room_rows),
+            *(map_registry_row(row, map_surgery) for row in surgery_rows),
+            *(map_registry_row(row, map_emergency_room) for row in emergency_room_rows),
         )
         return tuple(sorted(events, key=lambda event: (-event.start.timestamp(), event.id)))

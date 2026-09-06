@@ -5,18 +5,17 @@ implemented state only; later branches update this file as behavior is added.
 
 ## Current scope
 
-The backend currently provides a Registry vertical slice, pure grouping, and standalone
-PACS and Vitals source adapters. `GET /api/timeline` still reads only surgery and
-emergency-room parents through `RegistryAdapter`; the new child adapters and grouping are
-intentionally not wired into `TimelineService` until the federation branch. API parents
-therefore still have empty `children`, while `standalone` is empty and `partial` is
-`false`.
+The backend provides the complete assignment timeline flow. `GET /api/timeline` validates
+the request, applies role and requested-type policy, selects only required sources, runs
+those sources concurrently, filters normalized events again by the effective type
+allowlist, and passes the authorized events to pure temporal grouping.
 
-PACS and Vitals can independently return normalized typed child events with inclusive
-point-date filtering and bounded source timeouts. Grouping integration, RBAC,
-requested-type filtering, multi-source federation, retries, and partial-failure HTTP
-behavior are intentionally not implemented yet. `types` and `X-User-Role` therefore have
-no behavioral semantics in this slice and are not advertised as implemented inputs.
+Expected source failures preserve successful-source data and return HTTP 206 with
+`partial=true` and a deterministic source-name warning. If all selected sources fail, the
+same assignment behavior returns an empty degraded timeline. A role/type combination with
+no effective event types performs no external calls and returns an empty HTTP 200 result.
+Unexpected defects return a safe HTTP 500 envelope. Retries, circuit breakers, caching,
+pagination, and request-wide deadlines are not implemented.
 
 ## Local setup
 
@@ -28,7 +27,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 cp .env.example .env
-uvicorn timeline_api.main:app --reload --port 3000
+PYTHONPATH=src uvicorn timeline_api.main:app --reload --port 3000
 ```
 
 The application does not contact Postgres, MongoDB, or Vitals during import. Its asyncpg
@@ -37,7 +36,8 @@ is therefore not required merely to load the application or `/docs`.
 
 Available endpoints:
 
-- Registry timeline: `http://localhost:3000/api/timeline?patientId=1`
+- Timeline: `GET http://localhost:3000/api/timeline?patientId=1` with
+  `X-User-Role: doctor`
 - OpenAPI schema: `http://localhost:3000/openapi.json`
 - Swagger UI: `http://localhost:3000/docs`
 
@@ -53,12 +53,14 @@ src/timeline_api/
 │   ├── registry.py # Parameterized Registry reads and normalization
 │   └── vitals.py   # HTTP Vitals reads, validation, filtering, and normalization
 ├── api/
-│   ├── models.py   # Current Registry-only HTTP response
-│   ├── query.py    # Timeline query parsing and validation
-│   └── routes.py   # Thin route, dependencies, and HTTP error translation
+│   ├── models.py   # Frontend-compatible grouped timeline response
+│   ├── errors.py   # Validation and safe unexpected-error envelopes
+│   ├── query.py    # Role-independent query parsing and validation
+│   └── routes.py   # Thin dependency wiring and HTTP result translation
 ├── services/
 │   ├── grouping.py # Pure deterministic temporal grouping
-│   └── timeline.py # Registry-only application orchestration
+│   ├── policy.py   # Pure role/type policy and source selection
+│   └── timeline.py # Concurrent federation and response construction
 ├── config.py        # Typed environment and source-timeout settings
 ├── logging.py       # Privacy-safe JSON operational logging
 ├── main.py          # FastAPI application factory and application instance
@@ -87,23 +89,30 @@ All three are closed during lifespan shutdown.
 
 Application logs are JSON records with an explicit static `OperationalEvent` name and an
 allowlist of safe operational context: source, outcome, selected sources, partial status,
-and duration. The formatter never serializes arbitrary log message content and accepts an
-event name only from the `OperationalEvent` enum. Clinical payloads, vitals values,
-radiology notes, patient identifiers, raw upstream error text, and secrets are not
-serialized. HTTP client and server access INFO logs are suppressed because their URLs can
-contain patient identifiers.
+and duration. Each selected source emits a success/unavailable completion record, and each
+completed timeline emits selected-source and full/partial metadata. Unexpected request
+failures emit only a static failure event before the safe HTTP 500 response.
+
+The formatter never serializes arbitrary log message content and accepts an event name
+only from the `OperationalEvent` enum. Clinical payloads, vitals values, radiology notes,
+patient identifiers, raw upstream error text, and secrets are not serialized. HTTP client
+and server access INFO logs are suppressed because their URLs can contain patient
+identifiers.
 
 ## Verification
 
 ```bash
 cd backend
+pytest tests/unit/test_policy.py
+pytest tests/test_timeline_service.py
+pytest tests/test_timeline_api.py tests/test_main.py
 pytest tests/unit/test_grouping.py
 pytest tests/test_pacs.py tests/test_vitals.py
 pytest
 ruff check .
 ruff format --check .
 mypy
-python -c "from timeline_api.main import app; print(app.title)"
+PYTHONPATH=src python -c "from timeline_api.main import app; print(app.title)"
 ```
 
 The startup and docs tests enter the real application lifespan while external services are
@@ -116,7 +125,9 @@ infrastructure:
 cd backend
 TIMELINE_RUN_LIVE_TESTS=1 pytest tests/test_registry_live.py
 TIMELINE_RUN_LIVE_TESTS=1 pytest tests/test_source_adapters_live.py
-curl "http://localhost:3000/api/timeline?patientId=1"
+TIMELINE_RUN_LIVE_TESTS=1 pytest tests/test_timeline_federation_live.py
+curl -H "X-User-Role: doctor" \
+  "http://localhost:3000/api/timeline?patientId=1"
 ```
 
 The seed defines patient `1` with three surgeries and two emergency-room encounters. Live
@@ -126,6 +137,19 @@ adapter. The PACS seed contains 17 imaging documents for patient `1`, and the Vi
 returns 22 readings. The source-adapter live test verifies those counts, representative
 normalized values, patient filtering, optional bounds, exact inclusive boundaries, and
 stable PACS IDs.
+
+The live federation check makes a real all-source doctor request, verifies the complete
+seeded event counts after grouping, confirms that interns receive no imaging, and verifies
+that `types=vitals` returns only Vitals events without Registry parents.
+
+The supplied frontend's Vite `/api` proxy reaches port 3000 and consumes the existing
+camelCase event aliases plus `partial` and `warning`; a runtime proxy smoke succeeds. The
+backend also returns valid unmatched child events in `standalone`, but the supplied
+frontend currently does not render that array. A vitals-only response can therefore appear
+as “No events found” even though the API returned valid standalone events. This is a
+current frontend limitation, not a backend failure, and this branch does not redesign the
+supplied UI. The frontend production build also retains pre-existing TypeScript errors in
+`Timeline.tsx`.
 
 ## Decisions
 
@@ -255,6 +279,8 @@ them.
 
 - **Decision:** Keep asyncpg records, SQL column names, and Registry timestamp handling
 inside `RegistryAdapter`; return only normalized typed parent events to `TimelineService`.
+Malformed Registry rows raise `RegistryRowValidationError` at this boundary so schema/data
+contract failures become typed unavailable outcomes instead of unexpected HTTP 500s.
 - **Rationale:** Application behavior can depend on one source-independent event contract
 instead of database result shapes.
 - **Alternative considered:** Return asyncpg records to the service and normalize there.
@@ -315,9 +341,10 @@ opaque identifiers.
 
 ### Adapter timeout scope
 
-- **Decision:** Configure positive PACS and Vitals timeout values, defaulting to five
-seconds. PACS applies PyMongo's operation deadline around complete cursor materialization;
-Vitals passes its timeout on the HTTPX request.
+- **Decision:** Configure positive Registry, PACS, and Vitals timeout values, defaulting to
+five seconds. Registry wraps its asyncpg reads in `asyncio.wait_for`; PACS applies PyMongo's
+operation deadline around complete cursor materialization; Vitals passes its timeout on the
+HTTPX request.
 - **Rationale:** Each source call is bounded without introducing federation policy into an
 adapter.
 - **Alternative considered:** A request-wide propagated deadline.
@@ -328,14 +355,95 @@ propagation when production latency objectives and dependency budgets are define
 
 
 
+### Access policy and source minimization
+
+- **Decision:** `services/policy.py` is a pure policy boundary. Doctors may see all four
+event types; nurses may see emergency-room, imaging, and Vitals events; interns may see
+surgery, emergency-room, and Vitals events. Requested `types` are intersected with that
+role allowlist and can never expand access.
+- **Input behavior:** `types` is an optional comma-separated list of exact lowercase event
+type values. Surrounding whitespace is removed, duplicate values retain their first
+occurrence, and empty or unknown values return HTTP 400. If omitted, the role's full
+allowlist applies.
+- **Source plan:** Registry is selected for surgery or emergency-room types, PACS for
+imaging, and Vitals for vitals. The deterministic execution/warning order is Registry,
+PACS, then Vitals. Intern defaults therefore skip PACS, while `types=vitals` selects only
+Vitals.
+- **No selected sources:** If intersection leaves no effective event types, no adapter is
+called and the API returns an empty HTTP 200 timeline with `partial=false`.
+- **Rationale:** Applying policy before creating source operations both enforces visibility
+and avoids unauthorized or irrelevant dependency access.
+- **Alternative considered:** Fetch every source and filter only after grouping.
+- **Why not selected for this assignment:** It performs unnecessary I/O and can expose
+parent context that should have been removed before child assignment.
+- **Production reconsideration trigger:** Replace the assignment header role with trusted
+identity and patient authorization when a real authentication contract exists.
+
+
+### Concurrent federation and failure isolation
+
+- **Decision:** One `TimelineService` owns the application narrative. It asks policy for
+the source plan, creates operations only for selected sources, and executes independent
+operations concurrently with `asyncio.gather`.
+- **Typed outcomes:** Named database, MongoDB, HTTP, timeout, and source-schema failures
+become typed unavailable outcomes. Registry schema failures use
+`RegistryRowValidationError`; PACS and Vitals use their adapter validation errors.
+Successful outcomes carry only normalized events.
+Unexpected exception types are not downgraded and reach the safe HTTP 500 boundary.
+- **Degraded response:** Any unavailable selected source produces HTTP 206,
+`partial=true`, successful-source data, and a warning containing deterministic unavailable
+source names only. If every selected source is unavailable, the response remains an empty
+HTTP 206 for assignment consistency.
+- **Alternative considered:** Return HTTP 503 when all selected sources fail.
+- **Why not selected for this assignment:** The supplied status contract emphasizes 206
+for dependency failure and the approved assignment semantics apply it consistently.
+- **Production reconsideration trigger:** Define availability and retry contracts before
+choosing 503, retries, request deadlines, or circuit breakers for production.
+
+
+### RBAC before grouping and defense in depth
+
+- **Decision:** Filter normalized events by the effective role/requested-type allowlist
+before calling `group_events`, even though source selection already minimizes possible
+types. Authorized parents with no children are retained.
+- **Rationale:** Source adapters remain role-independent, and the second allowlist check
+protects against broad sources such as Registry returning both allowed and disallowed
+types. If an unauthorized parent is removed, an authorized child remains eligible and may
+become standalone or attach to another authorized parent.
+- **Alternative considered:** Group all events and remove unauthorized nodes afterward.
+- **Why not selected for this assignment:** Post-group filtering can silently discard an
+authorized child with its unauthorized parent and violates the assignment's requirement
+to filter both parent and child events.
+- **Production reconsideration trigger:** Preserve policy-before-grouping unless the
+product defines another explicit authorization-aware grouping rule.
+
+
+### Timeline HTTP validation and status translation
+
+- **Decision:** The route validates a positive `patientId`, required
+`X-User-Role: doctor|nurse|intern`, optional valid ISO8601 bounds, date order, and requested
+types before invoking the service. Aware dates normalize to UTC; valid naive dates are
+interpreted as UTC for this assignment.
+- **Status behavior:** Complete and no-selected-source results return 200; known source
+degradation returns 206; request validation returns 400 with details; unexpected defects
+return `{"detail":"Internal server error"}` with 500 and no raw exception text.
+- **Validation contract:** FastAPI raises `RequestValidationError` for invalid query/header
+input, but this application intentionally translates that to HTTP 400. The `/api/timeline`
+OpenAPI contract documents 400/206/500 and omits the framework-default 422 response.
+- **Rationale:** HTTP parsing and status translation stay at the API boundary while
+policy, source selection, and grouping remain framework-independent.
+- **Production reconsideration trigger:** Require an explicit timezone contract rather
+than interpreting naive clinical timestamps when integrating real systems.
+
+
 ### Pure timeline grouping
 
 - **Decision:** Use a pure `group_events` function that receives normalized parent and
 child sequences and returns immutable parent groups plus standalone children without
 mutating or copying event objects.
 - **Rationale:** Temporal assignment can be tested independently from FastAPI, policy,
-configuration, adapters, databases, and HTTP clients. The function can later receive only
-the events already authorized and selected by application orchestration.
+configuration, adapters, databases, and HTTP clients. The function receives only events
+already authorized and selected by application orchestration.
 - **Algorithm:** Sort copied parent entries by start and copied children chronologically,
 then sweep the children. Activate parents whose start is at or before the child into a heap
 ordered by latest start and then normalized ID ascending. Lazily remove candidates whose

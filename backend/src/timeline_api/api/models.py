@@ -1,15 +1,16 @@
-from typing import Annotated, Literal, assert_never
+from typing import Annotated, assert_never
 
 from pydantic import Field
 
 from timeline_api.domain import (
     ChildEvent,
     EmergencyRoomEvent,
-    ParentEvent,
+    EventSource,
     SurgeryEvent,
 )
 from timeline_api.domain.models import DomainModel
 from timeline_api.services import TimelineResult
+from timeline_api.services.grouping import GroupedParent
 
 
 class SurgeryParentResponse(SurgeryEvent):
@@ -29,10 +30,12 @@ type TimelineParentResponse = Annotated[
 class TimelineResponse(DomainModel):
     parents: tuple[TimelineParentResponse, ...]
     standalone: tuple[ChildEvent, ...]
-    partial: Literal[False]
+    partial: bool
+    warning: str | None = None
 
 
-def to_parent_response(parent: ParentEvent) -> TimelineParentResponse:
+def to_parent_response(grouped_parent: GroupedParent) -> TimelineParentResponse:
+    parent = grouped_parent.parent
     if isinstance(parent, SurgeryEvent):
         return SurgeryParentResponse(
             id=parent.id,
@@ -43,7 +46,7 @@ def to_parent_response(parent: ParentEvent) -> TimelineParentResponse:
             data=parent.data,
             start=parent.start,
             end=parent.end,
-            children=(),
+            children=grouped_parent.children,
         )
     if isinstance(parent, EmergencyRoomEvent):
         return EmergencyRoomParentResponse(
@@ -55,9 +58,15 @@ def to_parent_response(parent: ParentEvent) -> TimelineParentResponse:
             data=parent.data,
             start=parent.start,
             end=parent.end,
-            children=(),
+            children=grouped_parent.children,
         )
     assert_never(parent)
+
+
+def unavailable_sources_warning(sources: tuple[EventSource, ...]) -> str | None:
+    if not sources:
+        return None
+    return f"Unavailable sources: {', '.join(source.value for source in sources)}"
 
 
 def to_timeline_response(result: TimelineResult) -> TimelineResponse:
@@ -65,4 +74,5 @@ def to_timeline_response(result: TimelineResult) -> TimelineResponse:
         parents=tuple(to_parent_response(parent) for parent in result.parents),
         standalone=result.standalone,
         partial=result.partial,
+        warning=unavailable_sources_warning(result.unavailable_sources),
     )

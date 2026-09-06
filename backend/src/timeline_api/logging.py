@@ -9,6 +9,9 @@ from timeline_api.config import LogLevel
 class OperationalEvent(StrEnum):
     APPLICATION_STARTED = "application_started"
     APPLICATION_STOPPED = "application_stopped"
+    SOURCE_FETCH_COMPLETED = "source_fetch_completed"
+    TIMELINE_REQUEST_COMPLETED = "timeline_request_completed"
+    TIMELINE_REQUEST_FAILED = "timeline_request_failed"
 
 
 SAFE_OPERATIONAL_FIELDS = (
