@@ -5,18 +5,18 @@ implemented state only; later branches update this file as behavior is added.
 
 ## Current scope
 
-The backend currently provides a Registry vertical slice and a pure grouping module.
-`GET /api/timeline` parses a positive `patientId` and optional inclusive `from`/`to`
-bounds, calls `TimelineService`, reads surgery and emergency-room parents through
-`RegistryAdapter`, and returns normalized events. The grouping module accepts
-already-normalized authorized parents and children, but it is intentionally not wired into
-the Registry-only service until the federation branch. API parents therefore still have
-empty `children`, while `standalone` is empty and `partial` is `false`.
+The backend currently provides a Registry vertical slice, pure grouping, and standalone
+PACS and Vitals source adapters. `GET /api/timeline` still reads only surgery and
+emergency-room parents through `RegistryAdapter`; the new child adapters and grouping are
+intentionally not wired into `TimelineService` until the federation branch. API parents
+therefore still have empty `children`, while `standalone` is empty and `partial` is
+`false`.
 
-PACS, Vitals, grouping integration, RBAC, requested-type filtering, multi-source
-federation, retries, and partial-failure HTTP behavior are intentionally not implemented
-yet. `types` and `X-User-Role` therefore have no behavioral semantics in this slice and are
-not advertised as implemented inputs.
+PACS and Vitals can independently return normalized typed child events with inclusive
+point-date filtering and bounded source timeouts. Grouping integration, RBAC,
+requested-type filtering, multi-source federation, retries, and partial-failure HTTP
+behavior are intentionally not implemented yet. `types` and `X-User-Role` therefore have
+no behavioral semantics in this slice and are not advertised as implemented inputs.
 
 ## Local setup
 
@@ -49,7 +49,9 @@ Configuration uses `TIMELINE_`-prefixed environment variables documented in
 ```text
 src/timeline_api/
 ├── adapters/
-│   └── registry.py # Parameterized Registry reads and normalization
+│   ├── pacs.py     # MongoDB imaging reads and normalization
+│   ├── registry.py # Parameterized Registry reads and normalization
+│   └── vitals.py   # HTTP Vitals reads, validation, filtering, and normalization
 ├── api/
 │   ├── models.py   # Current Registry-only HTTP response
 │   ├── query.py    # Timeline query parsing and validation
@@ -57,7 +59,7 @@ src/timeline_api/
 ├── services/
 │   ├── grouping.py # Pure deterministic temporal grouping
 │   └── timeline.py # Registry-only application orchestration
-├── config.py        # Typed environment settings
+├── config.py        # Typed environment and source-timeout settings
 ├── logging.py       # Privacy-safe JSON operational logging
 ├── main.py          # FastAPI application factory and application instance
 ├── resources.py     # Shared client creation, access, and shutdown
@@ -96,6 +98,7 @@ contain patient identifiers.
 ```bash
 cd backend
 pytest tests/unit/test_grouping.py
+pytest tests/test_pacs.py tests/test_vitals.py
 pytest
 ruff check .
 ruff format --check .
@@ -106,18 +109,23 @@ python -c "from timeline_api.main import app; print(app.title)"
 The startup and docs tests enter the real application lifespan while external services are
 absent, proving that foundation startup remains lazy.
 
-To run the live Registry checks after starting the supplied PostgreSQL container:
+To run the live Registry and source-adapter checks after starting the supplied
+infrastructure:
 
 ```bash
 cd backend
 TIMELINE_RUN_LIVE_TESTS=1 pytest tests/test_registry_live.py
+TIMELINE_RUN_LIVE_TESTS=1 pytest tests/test_source_adapters_live.py
 curl "http://localhost:3000/api/timeline?patientId=1"
 ```
 
 The seed defines patient `1` with three surgeries and two emergency-room encounters. Live
 tests verify those counts through the endpoint and exercise no bounds, each single bound,
 both inclusive boundaries, non-overlap exclusion, and patient filtering through the real
-adapter.
+adapter. The PACS seed contains 17 imaging documents for patient `1`, and the Vitals mock
+returns 22 readings. The source-adapter live test verifies those counts, representative
+normalized values, patient filtering, optional bounds, exact inclusive boundaries, and
+stable PACS IDs.
 
 ## Decisions
 
@@ -176,6 +184,73 @@ layer.
 
 
 
+### PyMongo Async PACS access
+
+- **Decision:** Use the asynchronous API in PyMongo to query the supplied
+`pacs.imaging` collection through the lifespan-managed `AsyncMongoClient`.
+- **Rationale:** Patient and inclusive timestamp predicates execute in MongoDB, and a
+minimal projection limits each returned document to `_id`, `patientId`, `modality`,
+`timestamp`, and `radiologistNote`.
+- **Alternative considered:** Motor.
+- **Why not selected for this assignment:** Motor is deprecated in favor of PyMongo
+Async, while PyMongo already provides the required asynchronous cursor API and is the
+approved dependency.
+- **Production reconsideration trigger:** Reassess driver version and query indexes when
+measured production load, supported MongoDB versions, or PyMongo Async API stability
+requires it.
+
+
+
+### HTTPX Vitals access
+
+- **Decision:** Use the shared lifespan-managed HTTPX `AsyncClient` for
+`GET /vitals/{patientId}`.
+- **Rationale:** Reusing one asynchronous client preserves connection pooling and gives
+the adapter a direct way to apply its bounded call timeout. The supplied service has no
+date query parameters, so validated readings are filtered inside the adapter.
+- **Alternative considered:** Construct a client per adapter call.
+- **Why not selected for this assignment:** Per-call clients discard connection reuse and
+add unnecessary lifecycle work.
+- **Production reconsideration trigger:** Revisit client limits and timeout values from
+measured dependency latency and concurrency.
+
+
+
+### Child source adapter boundary
+
+- **Decision:** Keep Mongo document fields and Vitals response models inside their
+source-specific adapters; only `ImagingEvent` and `VitalsEvent` values cross into
+application/domain code.
+- **Rationale:** Strict source validation prevents raw dictionaries, Mongo documents, and
+HTTP response objects from leaking into orchestration.
+- **Alternative considered:** Return raw source values and map them in `TimelineService`.
+- **Why not selected for this assignment:** It would couple application policy and
+orchestration to two external schemas.
+- **Production reconsideration trigger:** Preserve the boundary when upstream schemas
+change; revise only the narrow source validators and normalized contract fields that
+product requirements actually need.
+
+
+
+### Child point-event filtering and timestamps
+
+- **Decision:** Apply inclusive `timestamp >= from` and `timestamp <= to` predicates in
+MongoDB for PACS. Validate all Vitals readings and then apply the same inclusive
+comparisons in the adapter because the supplied endpoint accepts only a patient path.
+Timezone-aware source values are converted to UTC; timezone-naive values are interpreted
+as UTC at the adapter boundary.
+- **Rationale:** Source-side PACS filtering avoids unnecessary transfer, while local
+Vitals filtering matches the actual mock contract. No naive datetime enters the domain.
+- **Alternative considered:** Load all PACS documents or require offsets on every supplied
+source timestamp.
+- **Why not selected for this assignment:** Loading all PACS data duplicates database
+work, and the assignment-level UTC assumption explicitly accommodates naive source values.
+- **Production reconsideration trigger:** Define explicit source timezone contracts before
+handling real clinical timestamps and add server-side Vitals bounds if that API gains
+them.
+
+
+
 ### Registry adapter boundary
 
 - **Decision:** Keep asyncpg records, SQL column names, and Registry timestamp handling
@@ -224,12 +299,32 @@ use an appropriate timezone-aware database type before handling real clinical ti
 
 - **Decision:** Construct IDs as `<source>:<type>:<source-key>` with a small pure helper.
 - **Rationale:** IDs are deterministic, stable, and unambiguous across sources. Registry
-parents currently produce `registry:surgery:<id>` and `registry:emergency_room:<id>`.
+parents produce `registry:surgery:<id>` and `registry:emergency_room:<id>`. PACS uses its
+stable Mongo `_id` as `pacs:imaging:<object-id>`. Because the Vitals response has no
+identifier, it uses
+`vitals:vitals:<patient-id>:<normalized-UTC-timestamp>` and assumes the supplied mock has
+at most one reading for a patient at a timestamp.
 - **Alternative considered:** A generic ID framework or generated UUIDs.
 - **Why not selected for this assignment:** A framework adds abstraction without another
 ID use case, while generated UUIDs are not stable across fetches.
-- **Production reconsideration trigger:** Revisit if a source lacks a stable key or the API
-requires opaque identifiers.
+- **Production reconsideration trigger:** Require a durable upstream Vitals identifier if
+multiple readings per patient/timestamp become valid, or revisit if the API requires
+opaque identifiers.
+
+
+
+### Adapter timeout scope
+
+- **Decision:** Configure positive PACS and Vitals timeout values, defaulting to five
+seconds. PACS applies PyMongo's operation deadline around complete cursor materialization;
+Vitals passes its timeout on the HTTPX request.
+- **Rationale:** Each source call is bounded without introducing federation policy into an
+adapter.
+- **Alternative considered:** A request-wide propagated deadline.
+- **Why not selected for this assignment:** Remaining-budget propagation belongs to later
+application orchestration and is intentionally outside this branch.
+- **Production reconsideration trigger:** Tune values and add request-wide deadline
+propagation when production latency objectives and dependency budgets are defined.
 
 
 
@@ -283,10 +378,9 @@ production compliance and operations requirements are defined.
 
 ### AI usage
 
-- **Decision:** Use Cursor's coding agent to inspect the approved plan, assignment,
-normalized domain contracts, and supplied seeds; implement the Registry vertical slice and
-pure grouping algorithm; add focused tests and documentation; and run validation and
-complete-diff reviews.
+- **Decision:** Use Cursor's coding agent to inspect requirements and existing code,
+support scoped implementation, add tests and documentation, run validation, and review
+changes.
 - **Rationale:** The agent accelerates mechanical implementation and systematic checking
 while the developer retains responsibility for scope and technical decisions.
 - **Alternative considered:** Implement and review the branch without AI assistance.
