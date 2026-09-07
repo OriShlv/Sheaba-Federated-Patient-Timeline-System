@@ -102,6 +102,8 @@ def test_valid_role_request_reaches_service(role: UserRole) -> None:
             to=None,
             role=role,
             requested_event_types=None,
+            limit=None,
+            offset=None,
         )
     ]
 
@@ -130,6 +132,8 @@ def test_requested_types_and_dates_are_normalized_before_service_call() -> None:
             to=datetime(2024, 1, 15, 12, tzinfo=UTC),
             role=UserRole.DOCTOR,
             requested_event_types=(EventType.VITALS, EventType.IMAGING),
+            limit=None,
+            offset=None,
         )
     ]
 
@@ -190,6 +194,92 @@ def test_invalid_request_returns_400(
 
     assert response.status_code == 400
     assert "detail" in response.json()
+
+
+def test_unknown_query_parameter_returns_400() -> None:
+    service = StubTimelineService(EMPTY_RESULT)
+    client = create_test_client(service)
+
+    with client:
+        response = client.get(
+            "/api/timeline",
+            params={"patientId": "1", "typse": "vitals"},
+            headers={"X-User-Role": "doctor"},
+        )
+
+    assert response.status_code == 400
+    assert "detail" in response.json()
+    assert service.received_queries == []
+
+
+def test_pagination_parameters_reach_service() -> None:
+    service = StubTimelineService(EMPTY_RESULT)
+    client = create_test_client(service)
+
+    with client:
+        response = client.get(
+            "/api/timeline",
+            params={"patientId": "1", "limit": "2", "offset": "1"},
+            headers={"X-User-Role": "doctor"},
+        )
+
+    assert response.status_code == 200
+    assert service.received_queries == [
+        TimelineQuery(
+            patient_id=1,
+            from_=None,
+            to=None,
+            role=UserRole.DOCTOR,
+            requested_event_types=None,
+            limit=2,
+            offset=1,
+        )
+    ]
+
+
+def test_zero_limit_returns_400() -> None:
+    service = StubTimelineService(EMPTY_RESULT)
+    client = create_test_client(service)
+
+    with client:
+        response = client.get(
+            "/api/timeline",
+            params={"patientId": "1", "limit": "0"},
+            headers={"X-User-Role": "doctor"},
+        )
+
+    assert response.status_code == 400
+    assert service.received_queries == []
+
+
+def test_negative_offset_returns_400() -> None:
+    service = StubTimelineService(EMPTY_RESULT)
+    client = create_test_client(service)
+
+    with client:
+        response = client.get(
+            "/api/timeline",
+            params={"patientId": "1", "offset": "-1"},
+            headers={"X-User-Role": "doctor"},
+        )
+
+    assert response.status_code == 400
+    assert service.received_queries == []
+
+
+def test_limit_above_max_returns_400() -> None:
+    service = StubTimelineService(EMPTY_RESULT)
+    client = create_test_client(service)
+
+    with client:
+        response = client.get(
+            "/api/timeline",
+            params={"patientId": "1", "limit": "101"},
+            headers={"X-User-Role": "doctor"},
+        )
+
+    assert response.status_code == 400
+    assert service.received_queries == []
 
 
 def test_complete_response_uses_frontend_compatible_contract() -> None:

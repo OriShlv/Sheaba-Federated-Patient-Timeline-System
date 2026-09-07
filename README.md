@@ -1,84 +1,18 @@
-# SHEBA CORTEX R&D Center
+# Federated Patient Timeline API
 
-## Tel HaShomer Information Technology & Digital Department
+Python FastAPI backend for the Sheba Cortex take-home assignment. It federates a patient timeline from Postgres Registry, MongoDB PACS, and an HTTP Vitals service, then groups point events under overlapping parent intervals.
 
-  
+The original task specification is preserved in [ASSIGNMENT.md](ASSIGNMENT.md).
 
-# Backend Developer Assignment
+## Overview
 
-## Federated Patient Timeline API
+The API is a small FastAPI application with one timeline route and one `TimelineService` orchestrator. Source-specific adapters normalize Registry surgeries and emergency-room intervals, PACS imaging studies, and Vitals readings into typed events. The service applies role and requested-type policy before I/O, fetches only the required sources concurrently, filters authorized events, and passes them to a pure grouping function. Expected source failures are isolated: healthy sources still return data, and the HTTP status becomes 206.
 
-  
+Grouping uses a sorted sweep over children with a heap of active parents. Inclusive interval membership and latest-start overlap resolution are the core of the algorithm. The strongest part of the solution is that grouping is independently tested and kept free of HTTP, policy, and database concerns. With more time, the main follow-ups would be trusted authentication, a request-wide deadline, and a durable upstream Vitals identifier—not changes to the assignment grouping contract.
 
-**Time Investment:** ~8-10 hours
+## Quick Start
 
-  
-<img width="2570" height="1440" alt="image" src="https://github.com/user-attachments/assets/79eb694c-4876-47ba-96ab-a2d65b513c9d" />
-
----
-
-  
-
-## Objective
-
-  
-
-Build the backend API for a Federated Patient Timeline System that demonstrates your:
-
-  
-
-- **System Integration**: Ability to aggregate data from multiple disparate sources (SQL, NoSQL, external APIs)
-
-- **Algorithmic Logic**: Implementation of complex hierarchical data grouping and temporal merging
-
-- **Resilience Patterns**: Handling service failures gracefully in a distributed system
-
-- **API Design**: Creating a clean, documented, and type-safe RESTful interface
-
-  
-
----
-
-  
-
-## What's Provided
-
-  
-
-You will receive:
-
-- ✅ **Frontend application** (React + TypeScript) - already built
-
-- ✅ **Docker Compose setup** with Postgres, MongoDB, Mock Vitals service
-
-- ✅ **Database seed data** (init.sql, MongoDB seed scripts)
-
-- ✅ **API contract specification** (what the frontend expects)
-
-  
-
-**Your task**: Implement the backend API that makes the frontend work.
-
-  
-
-**Important**: You may only change the frontend to point it to your backend base URL (e.g., `http://localhost:3000`). Please don't modify UI or business logic – we're evaluating backend skills only.
-
-  
-The link: https://github.com/edengby/Federated-Patient-Timeline-System
-
----
-
-  
-
-## Getting Started
-
-### Prerequisites
-
-- Docker and Docker Compose installed and running
-- Python 3.12 or newer (for running the backend)
-- Node.js with npm or yarn (only for running the frontend outside Docker)
-
-### How to Run the System
+**Prerequisites:** Docker and Docker Compose, Python 3.12 or newer.
 
 From the repository root:
 
@@ -86,908 +20,190 @@ From the repository root:
 ./start.sh
 ```
 
-This single script will:
-- Start all Docker services and wait for them to become healthy
-- Seed the MongoDB database
-- Create the backend virtual environment on first run
-- Install backend dependencies on first run
-- Copy `backend/.env.example` to `backend/.env` if needed
-- Start the backend on port `3000`
+| Service | URL |
+| --- | --- |
+| Frontend | http://localhost:5173 |
+| Backend | http://localhost:3000 |
+| API docs | http://localhost:3000/docs |
 
-Open the app at `http://localhost:5173`. Press `Ctrl+C` to stop the backend; Docker
-services keep running until you run `docker compose down`.
-
-To run the backend manually instead:
-
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
-cp .env.example .env
-PYTHONPATH=src uvicorn timeline_api.main:app --reload --host 0.0.0.0 --port 3000
-```
-
-### Service URLs
-
-Once everything is running, the services will be available at:
-
-- **Frontend**: http://localhost:5173
-- **Backend API**: http://localhost:3000 (when backend is running)
-- **API Docs**: http://localhost:3000/docs (when backend is running)
-- **Mock Vitals Service**: http://localhost:3001
-- **Postgres**: localhost:5432
-- **MongoDB**: localhost:27017
-- **Redis**: localhost:6379
-
-### Stopping Services
-
-To stop the infrastructure services:
+`Ctrl+C` stops the backend. Stop infrastructure with:
 
 ```bash
 docker compose down
 ```
 
-`Ctrl+C` stops the backend. The detached frontend and infrastructure services stop with
-`docker compose down`.
+## Architecture
 
-### Testing Database Data
+```mermaid
+flowchart LR
+  Frontend --> Route[FastAPI route]
+  Route --> Service[TimelineService]
+  Service --> Policy[Access policy]
+  Policy --> Adapters[Registry / PACS / Vitals adapters]
+  Adapters --> Events[Normalized events]
+  Events --> Filter[Authorization and type filtering]
+  Filter --> Grouping
+  Grouping --> Response
+```
 
-A test script is provided to verify that all databases have been seeded correctly with the expected data:
+Adapters own external schemas. Application code operates on normalized events. Grouping has no FastAPI, role, configuration, or I/O dependencies.
+
+## API
+
+`GET /api/timeline`
+
+| Parameter | Required | Description |
+| --- | --- | --- |
+| `patientId` | yes | Positive patient identifier |
+| `X-User-Role` | yes | `doctor`, `nurse`, or `intern` |
+| `from` | no | Inclusive ISO-8601 lower bound |
+| `to` | no | Inclusive ISO-8601 upper bound |
+| `types` | no | Comma-separated event types |
+| `limit` | no | Max parent events after grouping, 1–100 |
+| `offset` | no | Parent events to skip after grouping, ≥ 0 |
+
+Unknown query parameters are rejected. Pagination applies only to sorted parents; standalone events are unchanged. Omitting `limit` and `offset` returns the full grouped result. The response shape is unchanged: no pagination metadata is added.
+
+| Role | Visible types |
+| --- | --- |
+| doctor | surgery, emergency_room, imaging, vitals |
+| nurse | emergency_room, imaging, vitals |
+| intern | surgery, emergency_room, vitals |
+
+| Status | Meaning |
+| --- | --- |
+| 200 | All selected sources succeeded |
+| 206 | One or more selected sources were unavailable |
+| 400 | Validation error |
+| 500 | Unexpected internal failure |
 
 ```bash
-./test.sh
+curl -sS -H "X-User-Role: doctor" \
+  "http://localhost:3000/api/timeline?patientId=1"
 ```
-
-This script will:
-- ✅ Verify PostgreSQL has the correct number of patients, surgeries, and emergency room visits
-- ✅ Verify MongoDB has the correct number of imaging studies
-- ✅ Verify the Mock Vitals Service is running and returning the expected number of vitals
-
-**Expected Results:**
-- PostgreSQL - Patients: 1
-- PostgreSQL - Surgeries: 3
-- PostgreSQL - Emergency Rooms: 2
-- MongoDB - Imaging Studies: 17
-- Mock Vitals Service - Health check: ✓ PASS
-- Mock Vitals Service - Vitals for patient 1: 22
-
-All tests should pass if the infrastructure is set up correctly. If any tests fail, check that:
-1. All Docker services are running (`docker compose ps`)
-2. The databases have been seeded properly
-3. The Mock Vitals Service is accessible at `http://localhost:3001`
-
----
-
-  
-
-## Core Requirements
-
-  
-
-### 1. API Endpoint Specification
-
-  
-
-You must implement this exact endpoint:
-
-  
-
-```
-
-GET /api/timeline?patientId={number}&from={ISO8601}&to={ISO8601}&types={comma-separated}
-
-```
-
-  
-
-**Headers:**
-
-```
-
-X-User-Role: doctor | nurse | intern
-
-```
-
-  
-
-**Response Format:**
-
-```typescript
-
-{
-
-parents: Array<{
-
-id: string;
-
-type: 'surgery' | 'emergency_room';
-
-timestamp: string; // ISO8601
-
-patientId: number;
-
-start: string; // ISO8601
-
-end: string; // ISO8601
-
-data: {
-
-surgeonName?: string;
-
-procedure?: string;
-
-attendingPhysician?: string;
-
-chiefComplaint?: string;
-
-};
-
-source: 'registry';
-
-children: Array<{
-
-id: string;
-
-type: 'vitals' | 'imaging';
-
-timestamp: string; // ISO8601
-
-patientId: number;
-
-data: {
-
-bpm?: number;
-
-bp?: string;
-
-modality?: string;
-
-radiologistNote?: string;
-
-};
-
-source: 'vitals' | 'pacs';
-
-}>;
-
-}>;
-
-standalone: Array<...>; // Always empty array
-
-partial: boolean;
-
-warning?: string;
-
-}
-
-```
-
-  
-
-**Status Codes:**
-
-- `200`: Full data retrieved
-
-- `206`: Partial content (some services unavailable)
-
-- `400`: Validation error
-
-- `500`: Internal server error
-
-  
-
-### 2. Backend API Implementation (Python or Node.js)
-
-  
-
-#### Required Implementation
-
-  
-
-**1. Adapter Pattern**
-
-Create adapters for each data source:
-
-- `RegistryAdapter`: Fetch from Postgres (surgeries, emergency_rooms)
-
-- `PACSAdapter`: Fetch from MongoDB (imaging studies)
-
-- `VitalsAdapter`: Fetch from Mock Vitals API
-
-  
-
-Each adapter should:
-
-- Normalize data to common `TimelineEvent` interface
-
-- Handle date range filtering (`from`, `to`)
-
-- Handle errors gracefully
-
-  
-
-**Note**: You are free to choose any suitable ORM/DB client (e.g., Prisma, TypeORM, Mongoose, SQLAlchemy, asyncpg, pymongo, etc.), as long as the adapters expose a clean interface and return normalized `TimelineEvent` objects.
-
-  
-
-**2. Data Fetching**
-- Find the best way and choose according your choice.
-
-  
-
-**3. Resilience Pattern**
-
-- If any service fails (500 error, timeout, etc.):
-
-- **Do NOT fail the entire request**
-
-- Return data from other sources
-
-- Return HTTP status `206` (Partial Content)
-
-  
-
-**4. Data Normalization**
-
-Convert all sources to this interface:
-
-```typescript
-
-interface TimelineEvent {
-
-id: string;
-
-type: 'surgery' | 'emergency_room' | 'vitals' | 'imaging';
-
-timestamp: Date;
-
-patientId: number;
-
-data: { ... }; // Type-specific fields
-
-source: 'registry' | 'pacs' | 'vitals';
-
-start?: Date; // For parents only
-
-end?: Date; // For parents only
-
-}
-
-```
-
-  
-
-**5. Request Validation**
-
-- Use Zod (or similar) to validate query parameters
-
-- Return `400` with error details if validation fails
-
-- Handle invalid dates, missing required params, etc.
-
-  
-
-### 3. Hierarchical Event Grouping Algorithm (Critical)
-
-  
-
-This is the **core challenge**. Implement a grouping algorithm that:
-
-  
-
-**Step 1: Classify Events**
-
-- **Parents**: Surgeries, Emergency Rooms (have `start` and `end` times)
-
-- **Children**: Vitals, Imaging (have single `timestamp`)
-
-  
-
-**Step 2: Assignment Logic (Merge AsOf)**
-
-For each child event:
-
-1. Find all parents that are "open" at the child's timestamp
-
-- Condition: `parent.start <= child.timestamp <= parent.end`
-
-- Use **inclusive boundaries** (start and end times are included)
-
-2. If multiple parents are open:
-
-- Choose the parent that started **most recently**
-
-- This handles overlapping parents
-
-3. If no parent found:
-
-- Mark as "standalone"
-
-  
-
-**Step 3: Sorting**
-
-- Parents: Sort by start time, **latest to earliest** (newest first)
-
-- Children within each parent: Sort by timestamp, **earliest to latest** (chronological)
-
-   
-
-**Example:**
-
-```typescript
-
-// Input events:
-
-Surgery: 10:00-12:00
-
-ER: 11:00-13:00
-
-Vitals: 11:30
-
-  
-
-// Result: Vitals assigned to ER (most recent parent at 11:30)
-
-```
-
-  
-
-### 4. Role-Based Access Control (RBAC)
-
-  
-
-Implement RBAC filtering via `X-User-Role` header:
-
-  
-
-**Rules:**
-
-- **Doctor** (`role: 'doctor'`): Full timeline access (no filtering)
-
-- **Nurse** (`role: 'nurse'`): Hide **surgery** events completely (remove from parents array, remove from children)
-
-- **Intern** (`role: 'intern'`): Hide **imaging** events completely (remove from children arrays)
-
-  
-
-**Important:**
-
-- Filter both parent events AND child events
-
-- If a parent has no children after filtering, you can keep it or remove it (your choice)
-
-  
-
-### 5. Additional Backend Features (Your Choice)
-
-  
-
-**We particularly value:**
-
-- **Clear API documentation** (Swagger/OpenAPI at `/docs` endpoint)
-
-- **Proper request validation** (comprehensive schemas with detailed error messages)
-
-  
-
-**Other optional features:**
-
-- **Error Handling**: Proper error types, logging, and user-friendly messages
-
-- **Type Safety**: Full TypeScript coverage, no `any` types (or Python type hints)
-
-- **Code Organization**: Clean architecture, separation of concerns
-
-- **Performance**: Optimize database queries, efficient algorithms
-
-- **Logging**: Structured logging for debugging
-
-- **Caching Strategy**: Implement Redis caching (Redis is already in docker-compose)
-
-  
-
-**Note**: Partial or incomplete implementations are okay – just document what's missing and how you would complete it with more time.
-
-  
-
----
-
-  
-
-## Technical Implementation
-
-  
-
-### Backend Architecture
-
-  
-
-1. **Technology Stack** (Choose One)
-
-  
-
-**Option A: Node.js/TypeScript**
-**Option B: Python**
-  
-
-**Note**: Choose the stack you're most comfortable with. Both are equally acceptable.
-
-  
-
-**Port Configuration**: Your backend should run on port `3000` (or update the frontend's API base URL to match your port).
-
-  
-
-2. **API Design Requirements**
-
-- RESTful endpoint
-
-- Consistent error response format
-
-- Proper HTTP status codes (200, 206, 400, 500)
-
-- Request validation with clear error messages
-
-- Type-safe request/response handling (TypeScript types or Pydantic models)
-
-  
-
-### Database Schema (Provided)
-
-  
-
-**Postgres (Registry):**
-
-- `patients` table: `id`, `name`, `dob`
-
-- `surgeries` table: `id`, `patient_id`, `surgeon_name`, `procedure`, `start_time`, `end_time`
-
-- `emergency_rooms` table: `id`, `patient_id`, `attending_physician`, `chief_complaint`, `start_time`, `end_time`
-
-  
-
-**MongoDB (PACS):**
-
-- `imaging` collection: `patientId`, `modality`, `timestamp`, `radiologistNote`
-
-  
-
-**Mock Vitals Service:**
-
-- Endpoint: `GET http://localhost:3001/vitals/:patientId`
-
-- Returns: `Array<{ bpm: number, bp: string, timestamp: string }>`
-
-  
-
----
-
-  
-
-## Deliverables
-
-  
-
-### 1. Source Code
-
-- Well-organized backend codebase
-
-- Clear README with:
-
-- **Setup Instructions**: How to run the backend locally
-
-- **Architecture Decisions**: Why you chose certain approaches
-
-- **Features Implemented**: What you built
-
-- **Edge Cases Handled**: How you solved them
-
-- **Known Limitations**: What you didn't have time for
-
-  
-
-### 2. Documentation
-
-- **API Documentation**: Endpoint description, request/response examples
-
-- **Algorithm Explanation**: How the grouping logic works (with examples)
-
-- **Error Handling**: How you handle service failures
-
-- **Code Comments**: Key functions should be well-documented
-
-  
-
----
-
-  
-
-## Evaluation Criteria
-
-  
-
-### 1. Code Quality (25%)
-
-- Clean, maintainable, readable code
-
-- Proper error handling and logging
-
-- Type safety (TypeScript types or Python type hints)
-
-- Code organization and structure
-
-- Security considerations (input validation, SQL injection prevention)
-
-  
-
-### 2. Architecture (25%)
-
-- Adapter pattern implementation
-
-- Separation of concerns (adapters, services, routes)
-
-- API structure and design
-
-- Error handling strategy
-
-- Code reusability
-
-  
-
-### 3. Algorithm Implementation (30%) ⭐ **Most Important**
-
-- **Correctness** of grouping logic
-
-- **Edge case handling** (boundaries, overlapping parents)
-
-- Performance considerations
-
-- Code clarity and documentation
-
-  
-
-### 4. Technical Decisions (5%)
-
-- Technology choices and justification
-
-- Problem-solving approach
-
-- Trade-offs made
-
-- Best practices followed
-
-  
-
----
-
-  
-
-## Tips for Success
-
-  
-
-1. **Start with Core Functionality**
-
-- Get basic data fetching from all 3 sources working
-
-- Test with the provided frontend
-
-- Then implement grouping algorithm
-
-- Finally add RBAC and polish
-
-  
-
-2. **Scope Management**
-
-- **You can cut scope if needed** - as long as you explain trade-offs in your README
-
-- Focus on core requirements first (grouping algorithm, data aggregation, resilience)
-
-- Document what you didn't implement and why
-
-- This prevents perfectionism and overwork - we value clear thinking over complete implementation
-
-  
-
-3. **Test with Provided Frontend**
-
-- The frontend is already built - use it to verify your API works
-
-- Test all filter combinations
-
-- Test different roles (doctor, nurse, intern)
-
-- Verify edge cases visually
-
-  
-
-4. **Focus on Algorithm Correctness**
-
-- The grouping algorithm is the **core challenge**
-
-- Test boundary conditions thoroughly
-
-- Verify overlapping parents work correctly
-
-- Document your logic clearly
-
-- Language choice (Python vs Node.js) doesn't matter - focus on correctness
-
-  
-
-5. **Handle Errors Gracefully**
-
-- Don't let one service failure break everything
-
-- Return partial data with proper status codes
-
-- Log errors for debugging
-
-  
-
-6. **Document Key Decisions**
-
-- Why you chose certain approaches
-
-- How the grouping algorithm works
-
-- What edge cases you handle
-
-- What you would improve with more time
-
-  
-
-7. **Code Quality Matters**
-
-- Clean, readable code is easier to evaluate
-
-- Use type safety properly (TypeScript types or Python type hints)
-
-- Organize code logically
-
-- Add comments for complex logic
-
-- Follow language-specific best practices
-
-  
-
----
-
-  
-
-## Bonus Points
-
-  
-
-- **Caching**: Implement Redis caching with proper TTL
-
-- **API Documentation**: Swagger/OpenAPI at `/docs`
-
-- **Performance**: Optimize database queries, efficient algorithms
-
-- **Logging**: Structured logging for debugging and monitoring
-
-  
-
----
-
-  
-
-## Extra Challenges (Optional)
-
-  
-
-These are **optional stretch goals** for candidates who want to go above and beyond. They keep the core requirements the same but let strong candidates shine.
-
-  
-
-### A. Pagination or Windowing
-
-  
-
-Add optional query parameters to support pagination:
-
-  
-
-```
-
-GET /api/timeline?patientId=1&limit=10&offset=0
-
-```
-
-  
-
-**Parameters:**
-
-- `limit` (number, optional): Maximum number of parent events to return
-
-- `offset` (number, optional): Number of parent events to skip (for pagination)
-
-  
-
-**Behavior:**
-
-- Apply pagination **after** grouping and sorting
-
-- Return parents in chunks
-
-- Consider adding metadata: `{ total: number, limit: number, offset: number }`
-
-  
-
-### B. Rate Limiting
-
-  
-
-Implement a simple rate limit to prevent abuse:
-
-  
-
-**Requirements:**
-
-- Per-IP or per-API-key rate limiting
-
-- Max 60 requests per minute (configurable)
-
-- Return `429 Too Many Requests` when limit exceeded
-
-- Include `Retry-After` header with seconds until reset
-
-  
-
-**Implementation Options:**
-
-- Simple in-memory map (for single-instance deployments)
-
-- Redis-based (bonus - tests Redis integration)
-
-  
-
-**Response when rate limited:**
 
 ```json
-
 {
-
-"error": "Rate limit exceeded",
-
-"message": "Too many requests. Please try again later.",
-
-"retryAfter": 30
-
+  "parents": [
+    {
+      "id": "registry:surgery:1",
+      "type": "surgery",
+      "children": [{ "id": "vitals:vitals:1:2024-01-15T10:30:00Z", "type": "vitals" }]
+    }
+  ],
+  "standalone": [],
+  "partial": false
 }
-
 ```
 
-  
+Interactive documentation is at `/docs`.
 
-**Status Code:** `429 Too Many Requests`
+## Grouping Algorithm
 
-  
+Parent events are surgeries and emergency-room intervals. Child events are vitals and imaging points. A parent is eligible when:
 
-**Headers:**
+`parent.start <= child.timestamp <= parent.end`
 
+Boundaries are inclusive. If multiple parents overlap, the parent with the latest start wins. If none match, the child becomes standalone. Parents are returned newest-first; children within a parent are chronological.
+
+The implementation sorts parents by start and children by timestamp, then sweeps children while maintaining a heap of active parents ordered by latest start. Exact start and end matches stay inclusive because a parent is activated when `start <= timestamp` and dropped only when `end < timestamp`. When two eligible parents share the same start, the lower normalized parent ID wins. That tie-breaker is assignment-undefined and is documented here only because the implementation needs a deterministic result.
+
+After ordering inputs, heap assignment is `O((P + C) log P)`. For unsorted inputs the end-to-end cost is `O(P log P + C log C + (P + C) log P)` with `O(P + C)` space.
+
+## RBAC
+
+| Role | surgery | emergency_room | imaging | vitals |
+| --- | --- | --- | --- | --- |
+| Doctor | yes | yes | yes | yes |
+| Nurse | no | yes | yes | yes |
+| Intern | yes | yes | no | yes |
+
+Requested `types` are intersected with the role allowlist and can never expand permissions. Filtering happens before grouping, and only required sources are called. If an unauthorized parent is removed, an authorized child may become standalone or attach to another authorized parent.
+
+## Resilience
+
+Selected sources are fetched concurrently. Expected database, MongoDB, HTTP, timeout, and source-schema failures are isolated. Healthy sources still contribute events. A degraded result returns HTTP 206 with `partial=true` and a warning that names unavailable sources only. Unexpected defects return a safe HTTP 500 without raw exception text.
+
+## Validation
+
+- `patientId` must be a positive integer
+- `X-User-Role` must be `doctor`, `nurse`, or `intern`
+- `from` and `to` must be ISO-8601 strings; numeric epochs are rejected
+- timezone-aware bounds are converted to UTC; naive ISO timestamps are treated as UTC
+- `from` must be earlier than or equal to `to`
+- `types` must be a comma-separated list of `surgery`, `emergency_room`, `vitals`, or `imaging`
+- `limit` must be between 1 and 100; `offset` must be ≥ 0
+- unknown query parameters return HTTP 400
+
+## Testing
+
+```bash
+cd backend
+pytest
+TIMELINE_RUN_LIVE_TESTS=1 pytest
+ruff check .
+ruff format --check .
+mypy
 ```
 
-Retry-After: 30
+Live infrastructure is required only for the live pytest run. The seeded patient is `1`. With live infrastructure enabled, 154 tests currently pass.
 
-```
+## Key Technical Decisions
 
-  
+- **FastAPI** provides typed request/response models and OpenAPI at `/docs` without extra framework code.
+- **asyncpg** is used directly for two parameterized Registry queries instead of an ORM. The supplied schema does not benefit from mapping overhead.
+- **PyMongo Async** reads PACS imaging documents through a lifespan-managed client.
+- **HTTPX** reuses one async client for the Vitals mock, which has no date query parameters, so inclusive bounds are applied in the adapter.
+- **Adapter boundaries** keep SQL rows, Mongo documents, and HTTP payloads out of application code.
+- **One `TimelineService`** owns policy, source selection, concurrent federation, and response construction.
+- **Concurrent source fetches** use `asyncio.gather` so independent sources overlap in time.
+- **Pure grouping** keeps the scoring-critical algorithm testable without FastAPI, configuration, or I/O.
 
-This tests:
+## Assumptions and Requirement Ambiguities
 
-- Understanding of throttling/rate limiting concepts
+1. **Standalone contradiction.** The response example comments that `standalone` is always empty, but the grouping algorithm says unmatched children become standalone. The implementation follows the algorithm because grouping correctness is the core challenge.
+2. **Naive ISO timestamps** in requests and supplied sources are treated as UTC.
+3. **Vitals IDs.** The mock Vitals payload has no identifier, so IDs are `vitals:vitals:<patient-id>:<normalized-UTC-timestamp>`, assuming at most one reading per patient and timestamp.
+4. **Frontend standalone display.** The supplied frontend does not render `standalone` events. Frontend UI and business logic were left unchanged because the assignment allows only a backend URL/proxy adjustment.
 
-- Using Redis effectively (if chosen)
+## Known Limitations / Production Follow-ups
 
-- Proper HTTP status codes and headers
+These are production follow-ups, not missing assignment functionality:
 
-  
+- real authentication and patient-level authorization
+- a request-wide remaining-budget deadline
+- a durable upstream Vitals identifier
+- workload-driven database and index tuning
+- retries or circuit breakers only if production dependency behavior warrants them
 
----
+## UX Improvements I Would Propose
 
-  
+The supplied frontend was intentionally left unchanged beyond backend connectivity. The assignment prohibits modifying frontend UI or business logic, so the items below are theoretical product/UX proposals for discussion, not implemented features.
 
-## What We're Looking For
+### 1. Render standalone events
 
-  
+The backend returns child events with no eligible parent in `standalone`. The supplied frontend currently does not render that array, so a vitals-only response can contain valid data while the UI appears empty. I would surface standalone events directly in the timeline or in a dedicated section.
 
-We want to see:
+### 2. Add event-type filters
 
-- ✅ **Problem-solving skills**: How you approach the grouping algorithm
+The backend already supports the `types` query parameter: `surgery`, `emergency_room`, `vitals`, and `imaging`. The frontend does not expose this capability. Simple event-type filter controls would let clinicians hide noise without a new API.
 
-- ✅ **Clean code**: Readable, maintainable, well-organized
+### 3. Make partial-data states explicit
 
-- ✅ **Error handling**: Graceful degradation, proper status codes
+The backend can return HTTP 206 with `partial=true` when some sources are unavailable and others still return data. Users should be able to distinguish “there is no data” from “some data could not be retrieved.” A contextual warning near the timeline, naming unavailable sources, would make that distinction obvious.
 
-- ✅ **Type safety**: Proper TypeScript usage
+### 4. Improve timeline hierarchy and scanability
 
-- ✅ **Architecture**: Good separation of concerns, adapter pattern
+Parent encounters and child events could use a clearer visual hierarchy, with source indicators, child counts, and optionally collapsible encounters. That is an incremental scanability improvement, not a redesign.
 
-- ✅ **Edge cases**: Thoughtful handling of boundary conditions
+### 5. Improve loading and refresh feedback
 
-  
+The timeline is federated from multiple independent sources whose response times may differ. A clearer loading/refresh state, and optionally source freshness where appropriate, would make that wait more understandable.
 
-**Not required:**
+## AI Usage
 
-- ❌ Frontend development
+AI tools were used for implementation assistance, design exploration, test generation and review, and code review. Architecture decisions, scope, validation, review, and final acceptance were evaluated manually.
 
-- ❌ DevOps/deployment
+## Assignment
 
-- ❌ Perfect implementation (we understand time constraints)
-
-  
-
----
-
-  
-
-## Deadline
-
-  
-
-**14 days** from assignment receipt
-
-  
-
----
-
-  
-
-## Submission
-
-  
-
-Please provide:
-
-1. **GitHub/GitLab Repository URL** (public or access granted)
-
-2. **Clear README** with setup instructions
-
-3. **Brief Summary** (1-2 paragraphs) of:
-
-- How you implemented the grouping algorithm
-
-- Key technical decisions
-
-- What you're most proud of
-
-- What you would improve with more time
-
-  
-
----
-
-  
-
-## Questions?
-
-  
-
-If you have any questions about the requirements, please reach out. We're looking for:
-
-- **Problem-solving skills** over perfect implementation
-
-- **Clear thinking** over complex code
-
-- **Working solution** that integrates with the provided frontend
-
-  
-
-**Remember**: This assignment focuses on **backend skills** - API design, data aggregation, algorithms, and error handling. The frontend is provided to help you test your implementation.
-
-  
-
-Good luck! 🚀
-
-  
-
----
-
-  
-
-*SHEBA CORTEX R&D Center - Building the future of healthcare technology*
+The original provided task specification is in [ASSIGNMENT.md](ASSIGNMENT.md).

@@ -13,6 +13,11 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'; then
+    echo "❌ Python 3.12 or newer is required."
+    exit 1
+fi
+
 if ! docker info > /dev/null 2>&1; then
     echo "❌ Docker is not running. Please start Docker and try again."
     exit 1

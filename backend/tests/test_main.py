@@ -22,8 +22,20 @@ def test_openapi_and_docs_are_available() -> None:
     }
     assert ("header", "X-User-Role") in parameter_names
     assert ("query", "types") in parameter_names
+    assert ("query", "limit") in parameter_names
+    assert ("query", "offset") in parameter_names
+    parameters_by_name = {
+        (parameter["in"], parameter["name"]): parameter
+        for parameter in timeline_operation["parameters"]
+    }
+    assert (
+        "surgery, emergency_room, vitals, imaging"
+        in parameters_by_name[("query", "types")]["description"]
+    )
+    assert "doctor, nurse, intern" in parameters_by_name[("header", "X-User-Role")]["description"]
     responses = timeline_operation["responses"]
     assert "422" not in responses
+    assert responses["200"]["content"]["application/json"]["example"]["partial"] is False
     assert responses["206"]["content"]["application/json"] == {
         "schema": {"$ref": "#/components/schemas/TimelineResponse"},
         "example": {

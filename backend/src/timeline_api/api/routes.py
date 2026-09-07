@@ -11,6 +11,35 @@ from timeline_api.services import TimelineService, UserRole
 
 router = APIRouter(prefix="/api")
 
+COMPLETE_RESPONSE_EXAMPLE: dict[str, object] = {
+    "parents": [
+        {
+            "id": "registry:surgery:1",
+            "type": "surgery",
+            "source": "registry",
+            "timestamp": "2024-01-15T10:00:00Z",
+            "patientId": 1,
+            "data": {
+                "surgeonName": "Dr. Williams",
+                "procedure": "Appendectomy",
+            },
+            "start": "2024-01-15T10:00:00Z",
+            "end": "2024-01-15T12:00:00Z",
+            "children": [
+                {
+                    "id": "vitals:vitals:1:2024-01-15T10:30:00Z",
+                    "type": "vitals",
+                    "source": "vitals",
+                    "timestamp": "2024-01-15T10:30:00Z",
+                    "patientId": 1,
+                    "data": {"bpm": 72, "bp": "120/80"},
+                }
+            ],
+        }
+    ],
+    "standalone": [],
+    "partial": False,
+}
 PARTIAL_RESPONSE_EXAMPLE: dict[str, object] = {
     "parents": [],
     "standalone": [],
@@ -50,7 +79,16 @@ def get_timeline_service(request: Request) -> TimelineService:
     "/timeline",
     response_model=TimelineResponse,
     response_model_exclude_none=True,
+    summary="Get a federated patient timeline",
+    description=(
+        "Aggregates Registry, PACS, and Vitals events for a patient, applies role and "
+        "type filters, then groups children under overlapping parent intervals."
+    ),
     responses={
+        200: {
+            "description": "Complete timeline from all selected sources",
+            "content": {"application/json": {"example": COMPLETE_RESPONSE_EXAMPLE}},
+        },
         206: {
             "model": TimelineResponse,
             "description": "Timeline returned with one or more unavailable sources",
@@ -70,7 +108,15 @@ def get_timeline_service(request: Request) -> TimelineService:
 )
 async def get_timeline(
     query_parameters: Annotated[TimelineQueryParameters, Query()],
-    role: Annotated[UserRole, Header(alias="X-User-Role")],
+    role: Annotated[
+        UserRole,
+        Header(
+            alias="X-User-Role",
+            description=(
+                "Caller role for event-type access control. Allowed values: doctor, nurse, intern."
+            ),
+        ),
+    ],
     response: Response,
     service: Annotated[TimelineService, Depends(get_timeline_service)],
 ) -> TimelineResponse:

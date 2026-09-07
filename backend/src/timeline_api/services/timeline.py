@@ -45,6 +45,8 @@ class TimelineQuery:
     to: datetime | None
     role: UserRole
     requested_event_types: tuple[EventType, ...] | None
+    limit: int | None
+    offset: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,16 @@ def _partition_events(
     return parents, children
 
 
+def _paginate_parents(
+    parents: tuple[GroupedParent, ...],
+    limit: int | None,
+    offset: int | None,
+) -> tuple[GroupedParent, ...]:
+    start = 0 if offset is None else offset
+    end = None if limit is None else start + limit
+    return parents[start:end]
+
+
 class TimelineService:
     def __init__(
         self,
@@ -138,7 +150,7 @@ class TimelineService:
             outcome.source for outcome in outcomes if isinstance(outcome, SourceUnavailable)
         )
         result = TimelineResult(
-            parents=grouped.parents,
+            parents=_paginate_parents(grouped.parents, query.limit, query.offset),
             standalone=grouped.standalone,
             partial=bool(unavailable_sources),
             unavailable_sources=unavailable_sources,

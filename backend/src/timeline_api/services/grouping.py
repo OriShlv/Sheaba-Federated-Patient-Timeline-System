@@ -29,7 +29,12 @@ def group_events(
     parents: Sequence[ParentEvent],
     children: Sequence[ChildEvent],
 ) -> GroupingResult:
-    """Group normalized children under eligible parents without mutating inputs."""
+    """Assign children to active parent intervals without mutating inputs.
+
+    A child belongs to a parent when ``parent.start <= child.timestamp <= parent.end``.
+    If several parents overlap, the parent with the latest start wins. Children that
+    match no parent are returned as standalone events.
+    """
     indexed_parents: list[tuple[int, ParentEvent]] = list(enumerate(parents))
     indexed_parents.sort(key=lambda item: (item[1].start, item[1].id))
     ordered_children: list[ChildEvent] = sorted(

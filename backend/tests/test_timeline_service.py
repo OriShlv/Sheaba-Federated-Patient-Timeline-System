@@ -233,7 +233,57 @@ def make_query(
         to=None,
         role=role,
         requested_event_types=requested_event_types,
+        limit=None,
+        offset=None,
     )
+
+
+def make_paginated_query(limit: int | None, offset: int | None) -> TimelineQuery:
+    return TimelineQuery(
+        patient_id=1,
+        from_=None,
+        to=None,
+        role=UserRole.DOCTOR,
+        requested_event_types=None,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def pagination_surgery(event_id: str, hour: int) -> SurgeryEvent:
+    start = datetime(2024, 1, 15, hour, tzinfo=UTC)
+    return SurgeryEvent(
+        id=event_id,
+        type=EventType.SURGERY,
+        source=EventSource.REGISTRY,
+        timestamp=start,
+        patient_id=1,
+        start=start,
+        end=datetime(2024, 1, 15, hour + 1, tzinfo=UTC),
+        data=SurgeryData(surgeon_name="Dr. Williams", procedure="Appendectomy"),
+    )
+
+
+PAGINATION_EARLY = pagination_surgery("registry:surgery:early", 10)
+PAGINATION_MIDDLE = pagination_surgery("registry:surgery:middle", 12)
+PAGINATION_LATE = pagination_surgery("registry:surgery:late", 14)
+PAGINATION_STANDALONE = VitalsEvent(
+    id="vitals:vitals:standalone",
+    type=EventType.VITALS,
+    source=EventSource.VITALS,
+    timestamp=datetime(2024, 1, 15, 8, tzinfo=UTC),
+    patient_id=1,
+    data=VitalsData(bpm=72, bp="120/80"),
+)
+
+
+def pagination_service() -> TimelineService:
+    service, _registry, _pacs, _vitals = make_successful_service(
+        (PAGINATION_EARLY, PAGINATION_MIDDLE, PAGINATION_LATE),
+        (),
+        (PAGINATION_STANDALONE,),
+    )
+    return service
 
 
 def make_successful_service(
@@ -492,6 +542,52 @@ def test_authorized_child_becomes_standalone_when_parent_is_filtered_before_grou
 
     assert result.parents == ()
     assert result.standalone == (VITALS,)
+
+
+def test_omitted_pagination_returns_all_sorted_parents() -> None:
+    service = pagination_service()
+
+    result = asyncio.run(service.get_timeline(make_paginated_query(None, None)))
+
+    assert tuple(group.parent for group in result.parents) == (
+        PAGINATION_LATE,
+        PAGINATION_MIDDLE,
+        PAGINATION_EARLY,
+    )
+    assert result.standalone == (PAGINATION_STANDALONE,)
+
+
+def test_limit_returns_first_sorted_parents() -> None:
+    service = pagination_service()
+
+    result = asyncio.run(service.get_timeline(make_paginated_query(2, None)))
+
+    assert tuple(group.parent for group in result.parents) == (
+        PAGINATION_LATE,
+        PAGINATION_MIDDLE,
+    )
+    assert result.standalone == (PAGINATION_STANDALONE,)
+
+
+def test_offset_skips_first_sorted_parents() -> None:
+    service = pagination_service()
+
+    result = asyncio.run(service.get_timeline(make_paginated_query(None, 1)))
+
+    assert tuple(group.parent for group in result.parents) == (
+        PAGINATION_MIDDLE,
+        PAGINATION_EARLY,
+    )
+    assert result.standalone == (PAGINATION_STANDALONE,)
+
+
+def test_limit_and_offset_paginate_sorted_parents_together() -> None:
+    service = pagination_service()
+
+    result = asyncio.run(service.get_timeline(make_paginated_query(1, 1)))
+
+    assert tuple(group.parent for group in result.parents) == (PAGINATION_MIDDLE,)
+    assert result.standalone == (PAGINATION_STANDALONE,)
 
 
 def test_operational_logs_contain_only_safe_failure_metadata(
