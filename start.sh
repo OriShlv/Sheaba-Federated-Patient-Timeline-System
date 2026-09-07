@@ -2,40 +2,71 @@
 
 set -e
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$ROOT_DIR/backend"
+VENV_DIR="$BACKEND_DIR/.venv"
+
 echo "🚀 Starting Sheebah Patient Timeline System..."
 
-# Check if Docker is running
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "❌ python3 is required. Install Python 3.12 or newer and try again."
+    exit 1
+fi
+
 if ! docker info > /dev/null 2>&1; then
     echo "❌ Docker is not running. Please start Docker and try again."
     exit 1
 fi
 
-# Start infrastructure services
 echo "📦 Starting infrastructure services (Postgres, MongoDB, Redis, Mock Vitals, Frontend)..."
-docker-compose up -d
-
-# Wait for services to be ready
+cd "$ROOT_DIR"
 echo "⏳ Waiting for services to be ready..."
-sleep 15
+if ! docker compose up -d --wait --wait-timeout 120; then
+    echo "❌ Required Docker services did not become healthy within 120 seconds."
+    exit 1
+fi
 
-# Seed MongoDB if needed
 echo "🌱 Seeding MongoDB..."
-docker exec -i sheebah-timeline-mongodb mongosh pacs --quiet < infra/mongodb/seed-manual.js || echo "MongoDB seeding completed or already seeded"
+if ! docker exec -i sheebah-timeline-mongodb mongosh pacs --quiet \
+    < infra/mongodb/seed-manual.js; then
+    echo "❌ MongoDB seeding failed."
+    exit 1
+fi
 
-# Check if services are healthy
 echo "🔍 Checking service health..."
-docker-compose ps
+docker compose ps
+
+if [ ! -d "$VENV_DIR" ]; then
+    echo "🐍 Creating Python virtual environment..."
+    python3 -m venv "$VENV_DIR"
+fi
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+
+if ! python -c "import timeline_api" >/dev/null 2>&1; then
+    echo "📦 Installing backend dependencies (first run only)..."
+    python -m pip install -e "$BACKEND_DIR[dev]"
+fi
+
+if [ ! -f "$BACKEND_DIR/.env" ]; then
+    echo "⚙️  Creating backend/.env from .env.example..."
+    cp "$BACKEND_DIR/.env.example" "$BACKEND_DIR/.env"
+fi
 
 echo ""
-echo "✅ All services are running!"
+echo "✅ Infrastructure is ready!"
 echo ""
-echo "📋 Next steps:"
-echo "   1. Start the backend manually: cd backend && PYTHONPATH=src uvicorn timeline_api.main:app --reload --port 3000"
-echo ""
-echo "🌐 Services will be available at:"
-echo "   - Frontend: http://localhost:5173"
-echo "   - Backend API: http://localhost:3000 (when backend is running)"
-echo "   - API Docs: http://localhost:3000/docs (when backend is running)"
+echo "🌐 Services:"
+echo "   - Frontend:    http://localhost:5173"
+echo "   - Backend API: http://localhost:3000"
+echo "   - API Docs:    http://localhost:3000/docs"
 echo "   - Mock Vitals: http://localhost:3001"
 echo ""
-echo "🛑 To stop all services: docker-compose down"
+echo "🚀 Starting backend (Ctrl+C stops the backend only)"
+echo "🛑 Stop Docker services later with: docker compose down"
+echo ""
+
+cd "$BACKEND_DIR"
+export PYTHONPATH=src
+exec uvicorn timeline_api.main:app --reload --host 0.0.0.0 --port 3000

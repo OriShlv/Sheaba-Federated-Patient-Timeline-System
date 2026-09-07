@@ -1,7 +1,7 @@
 # Federated Patient Timeline Backend
 
 This is the canonical backend architecture and decision document. It describes the
-implemented state only; later branches update this file as behavior is added.
+implemented state only.
 
 ## Current scope
 
@@ -21,13 +21,18 @@ pagination, and request-wide deadlines are not implemented.
 
 Python 3.12 or newer is required.
 
+From the repository root, `./start.sh` starts Docker infrastructure, bootstraps the backend
+on first run, and launches Uvicorn on port `3000`.
+
+Manual backend-only startup:
+
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 cp .env.example .env
-PYTHONPATH=src uvicorn timeline_api.main:app --reload --port 3000
+PYTHONPATH=src uvicorn timeline_api.main:app --reload --host 0.0.0.0 --port 3000
 ```
 
 The application does not contact Postgres, MongoDB, or Vitals during import. Its asyncpg
@@ -145,10 +150,10 @@ that `types=vitals` returns only Vitals events without Registry parents.
 The supplied frontend's Vite `/api` proxy reaches port 3000 and consumes the existing
 camelCase event aliases plus `partial` and `warning`; a runtime proxy smoke succeeds. The
 backend also returns valid unmatched child events in `standalone`, but the supplied
-frontend currently does not render that array. A vitals-only response can therefore appear
-as “No events found” even though the API returned valid standalone events. This is a
-current frontend limitation, not a backend failure, and this branch does not redesign the
-supplied UI. The frontend production build also retains pre-existing TypeScript errors in
+frontend does not render that array. A vitals-only response can therefore appear as “No
+events found” even though the API returned valid standalone events. This is a supplied
+frontend presentation limitation; the backend implementation does not modify UI behavior.
+The supplied frontend production build retains pre-existing TypeScript errors in
 `Timeline.tsx`.
 
 ## Decisions
@@ -159,8 +164,8 @@ supplied UI. The frontend production build also retains pre-existing TypeScript 
 - **Rationale:** It provides typed request/response integration and `/docs` with little
 framework code.
 - **Alternative considered:** A Node.js/TypeScript backend.
-- **Why not selected for this assignment:** The approved plan selects Python, and FastAPI
-fits the required typed async integrations directly.
+- **Why not selected for this assignment:** The implementation uses Python, and FastAPI fits
+the required typed async integrations directly.
 - **Production reconsideration trigger:** Reconsider only if the owning team or deployment
 platform standardizes on another runtime.
 
@@ -218,7 +223,7 @@ minimal projection limits each returned document to `_id`, `patientId`, `modalit
 - **Alternative considered:** Motor.
 - **Why not selected for this assignment:** Motor is deprecated in favor of PyMongo
 Async, while PyMongo already provides the required asynchronous cursor API and is the
-approved dependency.
+selected dependency.
 - **Production reconsideration trigger:** Reassess driver version and query indexes when
 measured production load, supported MongoDB versions, or PyMongo Async API stability
 requires it.
@@ -314,7 +319,7 @@ bounds are converted back to naive UTC only when bound to those supplied columns
 - **Rationale:** Naive datetimes do not cross into the application/domain layer, while
 comparisons remain compatible with the unmodified assignment schema.
 - **Alternative considered:** Change the supplied columns to `TIMESTAMPTZ`.
-- **Why not selected for this assignment:** This branch consumes the provided schema and
+- **Why not selected for this assignment:** The implementation consumes the provided schema and
 must not silently migrate it or reinterpret seeded values.
 - **Production reconsideration trigger:** Define an explicit source timezone contract and
 use an appropriate timezone-aware database type before handling real clinical timestamps.
@@ -349,7 +354,7 @@ HTTPX request.
 adapter.
 - **Alternative considered:** A request-wide propagated deadline.
 - **Why not selected for this assignment:** Remaining-budget propagation belongs to later
-application orchestration and is intentionally outside this branch.
+application orchestration and is intentionally outside the current scope.
 - **Production reconsideration trigger:** Tune values and add request-wide deadline
 propagation when production latency objectives and dependency budgets are defined.
 
@@ -396,7 +401,7 @@ source names only. If every selected source is unavailable, the response remains
 HTTP 206 for assignment consistency.
 - **Alternative considered:** Return HTTP 503 when all selected sources fail.
 - **Why not selected for this assignment:** The supplied status contract emphasizes 206
-for dependency failure and the approved assignment semantics apply it consistently.
+for dependency failure, so the implementation applies it consistently.
 - **Production reconsideration trigger:** Define availability and retry contracts before
 choosing 503, retries, request deadlines, or circuit breakers for production.
 
@@ -491,7 +496,7 @@ support scoped implementation, add tests and documentation, run validation, and 
 changes.
 - **Rationale:** The agent accelerates mechanical implementation and systematic checking
 while the developer retains responsibility for scope and technical decisions.
-- **Alternative considered:** Implement and review the branch without AI assistance.
+- **Alternative considered:** Implement and review the repository without AI assistance.
 - **Why not selected for this assignment:** AI assistance was explicitly available and its
 actual use is documented for transparency.
 - **Production reconsideration trigger:** Apply the organization's code provenance,

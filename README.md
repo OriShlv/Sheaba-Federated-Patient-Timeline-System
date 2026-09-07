@@ -75,33 +75,38 @@ The link: https://github.com/edengby/Federated-Patient-Timeline-System
 ### Prerequisites
 
 - Docker and Docker Compose installed and running
-- Node.js (for running the backend and frontend)
-- npm or yarn package manager
+- Python 3.12 or newer (for running the backend)
+- Node.js with npm or yarn (only for running the frontend outside Docker)
 
 ### How to Run the System
 
-1. **Start Infrastructure Services**
+From the repository root:
 
-   Run the provided startup script to start all infrastructure services (Postgres, MongoDB, Redis, Mock Vitals):
+```bash
+./start.sh
+```
 
-   ```bash
-   ./start.sh
-   ```
+This single script will:
+- Start all Docker services and wait for them to become healthy
+- Seed the MongoDB database
+- Create the backend virtual environment on first run
+- Install backend dependencies on first run
+- Copy `backend/.env.example` to `backend/.env` if needed
+- Start the backend on port `3000`
 
-   This script will:
-   - Start all Docker services (Postgres, MongoDB, Redis, Mock Vitals, Frontend)
-   - Seed the MongoDB database
-   - Display service health status
+Open the app at `http://localhost:5173`. Press `Ctrl+C` to stop the backend; Docker
+services keep running until you run `docker compose down`.
 
-2. **Start the Backend** (Manual)
+To run the backend manually instead:
 
-   The backend should be run manually from the backend directory:
-
-   The backend should run on port `3000` (or update the frontend's API base URL accordingly).
-
-3. **Frontend** (Already Running)
-
-   The frontend is automatically started by `start.sh` via Docker Compose and will be available at `http://localhost:5173`.
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+cp .env.example .env
+PYTHONPATH=src uvicorn timeline_api.main:app --reload --host 0.0.0.0 --port 3000
+```
 
 ### Service URLs
 
@@ -120,10 +125,11 @@ Once everything is running, the services will be available at:
 To stop the infrastructure services:
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
-The backend and frontend can be stopped with `Ctrl+C` in their respective terminals.
+`Ctrl+C` stops the backend. The detached frontend and infrastructure services stop with
+`docker compose down`.
 
 ### Testing Database Data
 
@@ -147,7 +153,7 @@ This script will:
 - Mock Vitals Service - Vitals for patient 1: 22
 
 All tests should pass if the infrastructure is set up correctly. If any tests fail, check that:
-1. All Docker services are running (`docker-compose ps`)
+1. All Docker services are running (`docker compose ps`)
 2. The databases have been seeded properly
 3. The Mock Vitals Service is accessible at `http://localhost:3001`
 

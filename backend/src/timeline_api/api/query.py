@@ -14,6 +14,19 @@ class TimelineQueryParameters(BaseModel):
     to: datetime | None = None
     types: str | None = None
 
+    @field_validator("from_", "to", mode="before")
+    @classmethod
+    def validate_iso8601_date_string(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("date bounds must be valid ISO-8601 strings")
+        try:
+            datetime.fromisoformat(value)
+        except ValueError:
+            raise ValueError("date bounds must be valid ISO-8601 strings") from None
+        return value
+
     @field_validator("types")
     @classmethod
     def normalize_types(cls, value: str | None) -> str | None:

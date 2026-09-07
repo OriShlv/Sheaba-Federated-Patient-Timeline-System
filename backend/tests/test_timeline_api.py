@@ -134,6 +134,23 @@ def test_requested_types_and_dates_are_normalized_before_service_call() -> None:
     ]
 
 
+@pytest.mark.parametrize("parameter_name", ("from", "to"))
+def test_numeric_epoch_date_bound_returns_400(parameter_name: str) -> None:
+    service = StubTimelineService(EMPTY_RESULT)
+    client = create_test_client(service)
+
+    with client:
+        response = client.get(
+            "/api/timeline",
+            params={"patientId": "1", parameter_name: "1700000000"},
+            headers={"X-User-Role": "doctor"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"][0]["loc"] == ["query", parameter_name]
+    assert service.received_queries == []
+
+
 @pytest.mark.parametrize(
     ("params", "headers"),
     [
