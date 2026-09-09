@@ -109,7 +109,7 @@ Example request:
 
 ```bash
 curl -sS -H "X-User-Role: doctor" \
-  "http://localhost:3000/api/timeline?patientId=1"
+  "http://localhost:3000/api/timeline?patientId=1&from=2024-01-17T09:00:00Z&to=2024-01-17T09:00:00Z&types=surgery,vitals"
 ```
 
 Example response shape:
@@ -118,12 +118,28 @@ Example response shape:
 {
   "parents": [
     {
-      "id": "registry:surgery:1",
+      "id": "registry:surgery:3",
+      "timestamp": "2024-01-17T09:00:00Z",
+      "patientId": 1,
       "type": "surgery",
+      "source": "registry",
+      "data": {
+        "surgeonName": "Dr. Robert Taylor",
+        "procedure": "Hernia Repair"
+      },
+      "start": "2024-01-17T09:00:00Z",
+      "end": "2024-01-17T11:00:00Z",
       "children": [
         {
-          "id": "vitals:vitals:1:2024-01-15T10:30:00Z",
-          "type": "vitals"
+          "id": "vitals:vitals:1:2024-01-17T09:00:00Z",
+          "timestamp": "2024-01-17T09:00:00Z",
+          "patientId": 1,
+          "type": "vitals",
+          "source": "vitals",
+          "data": {
+            "bpm": 71,
+            "bp": "119/79"
+          }
         }
       ]
     }
