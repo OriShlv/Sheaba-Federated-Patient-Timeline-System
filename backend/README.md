@@ -4,7 +4,7 @@ Backend architecture notes for the FastAPI timeline API. The root [README](../RE
 
 ## Setup
 
-Python 3.12 or newer is required. From the repository root, `./start.sh` starts Docker infrastructure, creates `backend/.venv` on first run, and launches Uvicorn on port `3000`.
+Python 3.12 or newer is required. From the repository root, `./start.sh` starts Docker infrastructure, creates `backend/.venv` on first run, and launches Uvicorn on port `3000`. It does not wipe databases. A new MongoDB volume is seeded once by Docker init; `./reset.sh` is the explicit development command that deletes `pacs.imaging` and restores the assignment seed.
 
 ```bash
 cd backend

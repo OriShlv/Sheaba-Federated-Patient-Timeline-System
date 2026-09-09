@@ -20,6 +20,12 @@ From the repository root:
 ./start.sh
 ```
 
+`./start.sh` does not delete database data. A new MongoDB volume is seeded once by Docker init. To wipe PACS imaging and restore the assignment seed later:
+
+```bash
+./reset.sh
+```
+
 | Service | URL |
 | --- | --- |
 | Frontend | http://localhost:5173 |

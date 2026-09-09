@@ -1,10 +1,8 @@
-// Manual MongoDB seed script
-// Run with: mongosh mongodb://localhost:27017/pacs < seed-manual.js
-// Or: docker exec -i sheebah-timeline-mongodb mongosh pacs < seed-manual.js
+// Destructive PACS reset used by ./reset.sh.
+// Do not run from ./start.sh. First-time volumes are seeded by seed.js via Docker init.
 
 db = db.getSiblingDB('pacs');
 
-// Clear existing data (optional)
 db.imaging.deleteMany({});
 
 // Seed imaging studies for Patient 1 with EDGE CASES:

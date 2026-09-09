@@ -31,13 +31,6 @@ if ! docker compose up -d --wait --wait-timeout 120; then
     exit 1
 fi
 
-echo "🌱 Seeding MongoDB..."
-if ! docker exec -i sheebah-timeline-mongodb mongosh pacs --quiet \
-    < infra/mongodb/seed-manual.js; then
-    echo "❌ MongoDB seeding failed."
-    exit 1
-fi
-
 echo "🔍 Checking service health..."
 docker compose ps
 
@@ -70,6 +63,7 @@ echo "   - Mock Vitals: http://localhost:3001"
 echo ""
 echo "🚀 Starting backend (Ctrl+C stops the backend only)"
 echo "🛑 Stop Docker services later with: docker compose down"
+echo "♻️  Wipe and restore the assignment PACS seed with: ./reset.sh"
 echo ""
 
 cd "$BACKEND_DIR"
